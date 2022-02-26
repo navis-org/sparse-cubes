@@ -1,8 +1,11 @@
 # sparse-cubes
 Marching cubes for sparse matrices - i.e. `(N, 3)` voxel data.
 
-The only dependency is `numpy` and `trimesh`. Optionally uses `fastremap` if present.
+Running marching cubes directly on sparse voxels is faster and importantly much
+more memory efficient than converting to a 3d matrix and using the implementation
+in e.g. `sklearn`.
 
+The only dependencies are `numpy` and `trimesh`. Will use `fastremap` if present.
 
 ## Install
 
