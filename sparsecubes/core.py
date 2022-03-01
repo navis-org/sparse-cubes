@@ -71,9 +71,9 @@ def marching_cubes(voxels, spacing=None, step_size=1):
 
 def sort_cols(a, order=[0, 1, 2]):
     """Sort 2-d array by columns."""
-    for i, k in enumerate(order[::-1]):
-        a = a[a[:, k].argsort(kind='mergesort' if i > 0 else None)]
-    return a
+    cols = a.T[order[::-1]]
+    idx = np.lexsort(cols)
+    return a[idx]
 
 
 def find_surface_voxels(voxels):
@@ -245,15 +245,16 @@ def make_verts_faces(voxels_left,
     faces_back += offsets.reshape((-1, 1))
 
     # Combine vertices and faces
-    faces = faces_left
-    verts = verts_left
-    for v, f in [(verts_right, faces_right),
-                 (verts_bot, faces_bot),
-                 (verts_top, faces_top),
-                 (verts_front, faces_front),
-                 (verts_back, faces_back)]:
-        # Note we need to add another offset to faces
-        faces = np.vstack((faces, f + len(verts)))
-        verts = np.vstack((verts, v))
+    faces = [faces_left, faces_right, faces_bot, faces_top, faces_front, faces_back]
+    verts = [verts_left, verts_right, verts_bot, verts_top, verts_front, verts_back]
+
+    # Note we need to add another offset to faces
+    num_verts = 0
+    for v, f in zip(verts, faces):
+        f[:] += num_verts
+        num_verts += len(v)
+
+    verts = np.vstack(verts)
+    faces = np.vstack(faces)
 
     return verts, faces
