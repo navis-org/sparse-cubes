@@ -71,9 +71,9 @@ def marching_cubes(voxels, spacing=None, step_size=1):
 
 def sort_cols(a, order=[0, 1, 2]):
     """Sort 2-d array by columns."""
-    for i, k in enumerate(order[::-1]):
-        a = a[a[:, k].argsort(kind='mergesort' if i > 0 else None)]
-    return a
+    cols = a.T[order[::-1]]
+    idx = np.lexsort(cols)
+    return a[idx]
 
 
 def find_surface_voxels(voxels):
