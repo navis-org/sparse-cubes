@@ -9,6 +9,14 @@ The only dependencies are `numpy` and `trimesh`. Will use `fastremap` if present
 
 ## Install
 
+Install latest version from PyPI:
+
+```
+pip3 install sparse-cubes -U
+```
+
+To install developer version from Github:
+
 ```
 pip3 install git+https://github.com/navis-org/sparse-cubes.git
 ```
@@ -18,7 +26,8 @@ pip3 install git+https://github.com/navis-org/sparse-cubes.git
 ```python
 >>> import sparsecubes as sc
 >>> import numpy as np
->>> voxels = np.array([[0, 0, 0], [0, 0, 1]])
+>>> voxels = np.array([[0, 0, 0],
+...                    [0, 0, 1]])
 >>> m = sc.marching_cubes(voxels)
 >>> m
 <trimesh.Trimesh(vertices.shape=(12, 3), faces.shape=(20, 3))>
@@ -27,5 +36,6 @@ True
 ```
 
 ## Notes
-- Currently the mesh might have non-manifold edges. Trimesh will report these
+- The mesh might have non-manifold edges. Trimesh will report these
   meshes as not watertight but in the very literal definition they do hold water.
+- Currently only full edges.
