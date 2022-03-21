@@ -7,19 +7,35 @@ except ImportError:
     from numpy import unique
 
 
+# The original Trimesh automatically casts vertices to float64. Realistically
+# our meshes should be fine with uint32 most of the time so we will avoid the
+# casting altogether and hope we don't break anything in the process.
+# This should speed things up quite a bit and obviously also reduce the
+# memory footprint
+class Trimesh(tm.Trimesh):
+    @property
+    def vertices(self):
+        return self._data.get('vertices', np.empty(shape=(0, 3), dtype=np.uint32))
+
+    @vertices.setter
+    def vertices(self, values):
+        self._data['vertices'] = np.asanyarray(values, order='C')
+
+
 def marching_cubes(voxels, spacing=None, step_size=1):
     """Marching cubes algorithm to find surfaces in 2d voxel data.
 
     Parameters
     ----------
     voxels :    (N, 3) array
-                Input voxel data to find isosurfaces.
+                Input voxel data to find isosurfaces. The data type should be
+                carried over to the mesh vertices.
     spacing :   length-3 tuple of floats, optional
                 Voxel spacing in spatial dimensions corresponding to numpy array
                 indexing dimensions as in `voxels`.
     step_size : int, optional
-                Step size in voxels. Default 1. Larger steps yield faster but
-                coarser results.
+                Step size in voxels. Default 1. Larger steps yield coarser
+                results.
 
     Returns
     -------
@@ -59,22 +75,28 @@ def marching_cubes(voxels, spacing=None, step_size=1):
                                     voxels_bot,
                                     voxels_top)
 
-    # Create mesh (this also merges duplicate vertices)
-    m = tm.Trimesh(verts, faces)
+    # Create mesh
+    m = Trimesh(verts, faces, process=False)
+
+    # Collapse vertices
+    tm.grouping.merge_vertices(m, digits_vertex=0)
 
     # Apply spacing after we collapse duplicate vertices
     if not isinstance(spacing, type(None)):
-        m.vertices *= spacing
+        m.vertices = m.vertices * spacing
 
     return m
 
 
 def sort_cols(a, order=[0, 1, 2]):
     """Sort 2-d array by columns."""
-    cols = a.T[order[::-1]]
-    idx = np.lexsort(cols)
-    return a[idx]
+    return a[argsort_cols(a, order=order)]
 
+
+def argsort_cols(a, order=[0, 1, 2]):
+    """Sort 2-d array by columns."""
+    cols = a.T[order[::-1]]
+    return np.lexsort(cols)
 
 def find_surface_voxels(voxels):
     """Find surface voxels.
