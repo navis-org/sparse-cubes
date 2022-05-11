@@ -7,7 +7,7 @@ except ImportError:
     from numpy import unique
 
 
-# The original Trimesh automatically casts vertices to float64. Realistically
+# The original Trimesh automatically casts vertices to float64. Realistically,
 # our meshes should be fine with uint32 most of the time so we will avoid the
 # casting altogether and hope we don't break anything in the process.
 # This should speed things up quite a bit and obviously also reduce the
@@ -28,8 +28,10 @@ def marching_cubes(voxels, spacing=None, step_size=1):
     Parameters
     ----------
     voxels :    (N, 3) array
-                Input voxel data to find isosurfaces. The data type should be
-                carried over to the mesh vertices.
+                XYZ voxel coordinates to find isosurfaces for. The data type
+                should carry over to the mesh vertices - i.e. if `voxels` are
+                unsigned 32-bit integers, the mesh vertex coordinates should
+                also end up being unsigned 32-bit integers.
     spacing :   length-3 tuple of floats, optional
                 Voxel spacing in spatial dimensions corresponding to numpy array
                 indexing dimensions as in `voxels`.
