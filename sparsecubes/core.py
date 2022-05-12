@@ -27,11 +27,11 @@ def marching_cubes(voxels, spacing=None, step_size=1):
 
     Parameters
     ----------
-    voxels :    (N, 3) array
-                XYZ voxel coordinates to find isosurfaces for. The data type
-                should carry over to the mesh vertices - i.e. if `voxels` are
-                unsigned 32-bit integers, the mesh vertex coordinates should
-                also end up being unsigned 32-bit integers.
+    voxels :    (N, 3) array of integers
+                XYZ voxel coordinates (indices) to find isosurfaces for. The
+                data type should carry over to the mesh vertices - i.e. if
+                `voxels` are unsigned 32-bit integers, the mesh vertex
+                coordinates should also end up being unsigned 32-bit integers.
     spacing :   length-3 tuple of floats, optional
                 Voxel spacing in spatial dimensions corresponding to numpy array
                 indexing dimensions as in `voxels`.

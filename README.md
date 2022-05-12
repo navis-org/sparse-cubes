@@ -1,5 +1,5 @@
 # sparse-cubes
-Marching cubes for `(N, 3)` voxel coordinates - i.e. the equivalent of a 3D
+Marching cubes for `(N, 3)` voxel indices - i.e. the equivalent of a 3D
 sparse matrix in COOrdinate format.
 
 Running marching cubes directly on sparse voxels is faster and importantly much
@@ -27,8 +27,10 @@ pip3 install git+https://github.com/navis-org/sparse-cubes.git
 ```python
 >>> import sparsecubes as sc
 >>> import numpy as np
+>>> # Indices for two adjacent voxels
 >>> voxel_xyz = np.array([[0, 0, 0],
-...                       [0, 0, 1]])
+...                       [0, 0, 1]],
+...                      dtype='uint32')
 >>> m = sc.marching_cubes(voxel_xyz)
 >>> m
 <trimesh.Trimesh(vertices.shape=(12, 3), faces.shape=(20, 3))>
