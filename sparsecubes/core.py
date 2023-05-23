@@ -90,7 +90,8 @@ def marching_cubes(voxels, spacing=None, step_size=1, verbose=False):
 
     # Collapse vertices
     log('Merging vertices... ', end='', flush=True, verbose=verbose)
-    merge_vertices(m)
+    tm.grouping.merge_vertices(m, digits_vertex=0,
+                               merge_tex=True, merge_norm=True)
     log('Done.', flush=True, verbose=verbose)
 
     # Apply spacing after we collapse duplicate vertices
