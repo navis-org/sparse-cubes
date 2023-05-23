@@ -22,7 +22,7 @@ class Trimesh(tm.Trimesh):
         self._data['vertices'] = np.asanyarray(values, order='C')
 
 
-def marching_cubes(voxels, spacing=None, step_size=1):
+def marching_cubes(voxels, spacing=None, step_size=1, verbose=False):
     """Marching cubes algorithm to find surfaces in 2d voxel data.
 
     Parameters
@@ -38,6 +38,8 @@ def marching_cubes(voxels, spacing=None, step_size=1):
     step_size : int, optional
                 Step size in voxels. Default 1. Larger steps yield coarser
                 results.
+    verbose :   bool
+                If True, will provide some feedback on progress.
 
     Returns
     -------
@@ -62,31 +64,40 @@ def marching_cubes(voxels, spacing=None, step_size=1):
             spacing = spacing * step_size
 
     # Find surface voxels
+    log('Looking for surface voxels... ', end='', flush=True, verbose=verbose)
     (voxels_left,
      voxels_right,
      voxels_back,
      voxels_front,
      voxels_bot,
      voxels_top) = find_surface_voxels(voxels)
+    log('Done.', flush=True, verbose=verbose)
 
     # Generate vertices + faces
+    log('Generating vertices and faces... ', end='', flush=True, verbose=verbose)
     verts, faces = make_verts_faces(voxels_left,
                                     voxels_right,
                                     voxels_back,
                                     voxels_front,
                                     voxels_bot,
                                     voxels_top)
+    log('Done.', flush=True, verbose=verbose)
 
     # Create mesh
+    log('Making mesh... ', end='', flush=True, verbose=verbose)
     m = Trimesh(verts, faces, process=False)
+    log('Done.', flush=True, verbose=verbose)
 
     # Collapse vertices
-    tm.grouping.merge_vertices(m, digits_vertex=0)
+    log('Merging vertices... ', end='', flush=True, verbose=verbose)
+    merge_vertices(m)
+    log('Done.', flush=True, verbose=verbose)
 
     # Apply spacing after we collapse duplicate vertices
     if not isinstance(spacing, type(None)):
         m.vertices = m.vertices * spacing
 
+    log('All done!', flush=True, verbose=verbose)
     return m
 
 
@@ -282,3 +293,9 @@ def make_verts_faces(voxels_left,
     faces = np.vstack(faces)
 
     return verts, faces
+
+
+def log(statement, verbose=False, **kwargs):
+    """Print statement if verbose is True."""
+    if verbose:
+        print(statement, **kwargs)
