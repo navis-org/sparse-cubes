@@ -6,6 +6,8 @@ try:
 except ImportError:
     from numpy import unique
 
+INT_DTYPES = (np.int64, np.int32, np.int16, np.uint64, np.uint32, np.uint16)
+
 
 # The original Trimesh automatically casts vertices to float64. Realistically,
 # our meshes should be fine with uint32 most of the time so we will avoid the
@@ -15,15 +17,24 @@ except ImportError:
 class Trimesh(tm.Trimesh):
     @property
     def vertices(self):
-        return self._data.get('vertices', np.empty(shape=(0, 3), dtype=np.uint32))
+        return self._data.get("vertices", np.empty(shape=(0, 3), dtype=np.uint32))
 
     @vertices.setter
     def vertices(self, values):
-        self._data['vertices'] = np.asanyarray(values, order='C')
+        self._data["vertices"] = np.asanyarray(values, order="C")
 
 
 def marching_cubes(voxels, spacing=None, step_size=1, verbose=False):
-    """Marching cubes algorithm to find surfaces in 2d voxel data.
+    """Alias for dual_contour. Kept for backwards compatibility."""
+    return dual_contour(voxels, spacing=spacing, step_size=step_size, verbose=verbose)
+
+
+def dual_contour(voxels, spacing=None, step_size=1, verbose=False):
+    """Dual contouring algorithm to find surfaces in 2d voxel data.
+
+    Important
+    ---------
+    The
 
     Parameters
     ----------
@@ -34,7 +45,10 @@ def marching_cubes(voxels, spacing=None, step_size=1, verbose=False):
                 coordinates should also end up being unsigned 32-bit integers.
     spacing :   length-3 tuple of floats, optional
                 Voxel spacing in spatial dimensions corresponding to numpy array
-                indexing dimensions as in `voxels`.
+                indexing dimensions as in `voxels`. Note that the data type of
+                `spacing` will affect the data type of the mesh's vertices.
+                Ideally, you should use the same dtype for `spacing` as for
+                `voxels`.
     step_size : int, optional
                 Step size in voxels. Default 1. Larger steps yield coarser
                 results.
@@ -52,53 +66,48 @@ def marching_cubes(voxels, spacing=None, step_size=1, verbose=False):
         raise TypeError(f'Expected 2d numpy array, got "{voxels.ndim}"')
     elif voxels.shape[1] != 3:
         raise TypeError(f'Expected numpy array of shape (N, 3), got "{voxels.shape}"')
+    elif voxels.dtype not in INT_DTYPES:
+        raise TypeError(f"Expected integer dtype, got {voxels.dtype}")
 
     if not isinstance(spacing, type(None)):
         spacing = np.array(spacing)
 
     # Step size is implemented by simple downsampling
     if step_size and step_size > 1:
-        voxels = unique(voxels // step_size, axis=0)
+        voxels = unique(voxels // step_size, axis=0).astype(voxels.dtype)
 
         if not isinstance(spacing, type(None)):
             spacing = spacing * step_size
 
     # Find surface voxels
-    log('Looking for surface voxels... ', end='', flush=True, verbose=verbose)
-    (voxels_left,
-     voxels_right,
-     voxels_back,
-     voxels_front,
-     voxels_bot,
-     voxels_top) = find_surface_voxels(voxels)
-    log('Done.', flush=True, verbose=verbose)
+    log("Looking for surface voxels... ", end="", flush=True, verbose=verbose)
+    (voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top) = (
+        find_surface_voxels(voxels)
+    )
+    log("Done.", flush=True, verbose=verbose)
 
     # Generate vertices + faces
-    log('Generating vertices and faces... ', end='', flush=True, verbose=verbose)
-    verts, faces = make_verts_faces(voxels_left,
-                                    voxels_right,
-                                    voxels_back,
-                                    voxels_front,
-                                    voxels_bot,
-                                    voxels_top)
-    log('Done.', flush=True, verbose=verbose)
+    log("Generating vertices and faces... ", end="", flush=True, verbose=verbose)
+    verts, faces = make_verts_faces(
+        voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+    )
+    log("Done.", flush=True, verbose=verbose)
 
     # Create mesh
-    log('Making mesh... ', end='', flush=True, verbose=verbose)
+    log("Making mesh... ", end="", flush=True, verbose=verbose)
     m = Trimesh(verts, faces, process=False)
-    log('Done.', flush=True, verbose=verbose)
+    log("Done.", flush=True, verbose=verbose)
 
     # Collapse vertices
-    log('Merging vertices... ', end='', flush=True, verbose=verbose)
-    tm.grouping.merge_vertices(m, digits_vertex=0,
-                               merge_tex=True, merge_norm=True)
-    log('Done.', flush=True, verbose=verbose)
+    log("Merging vertices... ", end="", flush=True, verbose=verbose)
+    tm.grouping.merge_vertices(m, digits_vertex=0, merge_tex=True, merge_norm=True)
+    log("Done.", flush=True, verbose=verbose)
 
     # Apply spacing after we collapse duplicate vertices
     if not isinstance(spacing, type(None)):
         m.vertices = m.vertices * spacing
 
-    log('All done!', flush=True, verbose=verbose)
+    log("All done!", flush=True, verbose=verbose)
     return m
 
 
@@ -111,6 +120,7 @@ def argsort_cols(a, order=[0, 1, 2]):
     """Sort 2-d array by columns."""
     cols = a.T[order[::-1]]
     return np.lexsort(cols)
+
 
 def find_surface_voxels(voxels):
     """Find surface voxels.
@@ -147,7 +157,7 @@ def find_surface_voxels(voxels):
     # Do the same for the back voxels
     is_back = np.ones(len(voxels), dtype=bool)
     same_xy = np.all(voxels[:-1, :2] == voxels[1:, :2], axis=1)
-    #dist_z = voxels[:-1, 2] - voxels[1:, 2]
+    # dist_z = voxels[:-1, 2] - voxels[1:, 2]
     is_back[:-1] = ~same_xy | (dist_z > 1)
     voxels_back = voxels[is_back]
 
@@ -161,7 +171,7 @@ def find_surface_voxels(voxels):
 
     is_right = np.ones(len(voxels), dtype=bool)
     same_yz = np.all(voxels[:-1, 1:] == voxels[1:, 1:], axis=1)
-    #dist_x = voxels[:-1, 0] - voxels[1:, 0]
+    # dist_x = voxels[:-1, 0] - voxels[1:, 0]
     is_right[:-1] = ~same_yz | (dist_x > 1)
     voxels_right = voxels[is_right]
 
@@ -175,24 +185,100 @@ def find_surface_voxels(voxels):
 
     is_top = np.ones(len(voxels), dtype=bool)
     same_xz = np.all(voxels[:-1, [0, 2]] == voxels[1:, [0, 2]], axis=1)
-    #dist_y = voxels[:-1, 1] - voxels[1:, 1]
+    # dist_y = voxels[:-1, 1] - voxels[1:, 1]
     is_top[:-1] = ~same_xz | (dist_y > 1)
     voxels_top = voxels[is_top]
 
-    return (voxels_left,
-            voxels_right,
-            voxels_back,
-            voxels_front,
-            voxels_bot,
-            voxels_top)
+    return (
+        voxels_left,
+        voxels_right,
+        voxels_back,
+        voxels_front,
+        voxels_bot,
+        voxels_top,
+    )
 
 
-def make_verts_faces(voxels_left,
-                     voxels_right,
-                     voxels_back,
-                     voxels_front,
-                     voxels_bot,
-                     voxels_top):
+def surface_voxel_mask(voxels):
+    """Create mask for voxels.
+
+    Parameters
+    ----------
+    voxels :    (N, 3) numpy arraay
+
+    Returns
+    -------
+    (voxels_left,
+     voxels_right,
+     voxels_back,
+     voxels_front,
+     voxels_bot,
+     voxels_top)
+
+    """
+    # Get surface voxels from back to front
+    srt = argsort_cols(voxels, order=[0, 1, 2])
+    vxl_srt = voxels[srt]
+    is_front = np.ones(len(voxels), dtype=bool)
+
+    # For each voxel check if previous voxel is in same xy
+    same_xy = np.all(vxl_srt[1:, :2] == vxl_srt[:-1, :2], axis=1)
+
+    # For each voxel check the distance along z to previous voxel
+    dist_z = vxl_srt[1:, 2] - vxl_srt[:-1, 2]
+
+    # Front voxels are those where the prior voxel is either
+    # not in the same xy or is more than one voxel along Z away
+    is_front[1:] = ~same_xy | (dist_z > 1)
+    voxels_front = srt[is_front]
+
+    # Do the same for the back voxels
+    is_back = np.ones(len(voxels), dtype=bool)
+    same_xy = np.all(vxl_srt[:-1, :2] == voxels[1:, :2], axis=1)
+    is_back[:-1] = ~same_xy | (dist_z > 1)
+    voxels_back = srt[is_back]
+
+    # Now left to right
+    srt = argsort_cols(voxels, order=[2, 1, 0])
+    vxl_srt = voxels[srt]
+    is_left = np.ones(len(vxl_srt), dtype=bool)
+    same_yz = np.all(vxl_srt[1:, 1:] == vxl_srt[:-1, 1:], axis=1)
+    dist_x = vxl_srt[1:, 0] - vxl_srt[:-1, 0]
+    is_left[1:] = ~same_yz | (dist_x > 1)
+    voxels_left = srt[is_left]
+
+    is_right = np.ones(len(vxl_srt), dtype=bool)
+    same_yz = np.all(vxl_srt[:-1, 1:] == vxl_srt[1:, 1:], axis=1)
+    is_right[:-1] = ~same_yz | (dist_x > 1)
+    voxels_right = srt[is_right]
+
+    # Last but not least: top to bottom
+    srt = argsort_cols(voxels, order=[0, 2, 1])
+    vxl_srt = voxels[srt]
+    is_bot = np.ones(len(vxl_srt), dtype=bool)
+    same_xz = np.all(vxl_srt[1:, [0, 2]] == vxl_srt[:-1, [0, 2]], axis=1)
+    dist_y = vxl_srt[1:, 1] - vxl_srt[:-1, 1]
+    is_bot[1:] = ~same_xz | (dist_y > 1)
+    voxels_bot = srt[is_bot]
+
+    is_top = np.ones(len(vxl_srt), dtype=bool)
+    same_xz = np.all(vxl_srt[:-1, [0, 2]] == vxl_srt[1:, [0, 2]], axis=1)
+    is_top[:-1] = ~same_xz | (dist_y > 1)
+    voxels_top = srt[is_top]
+
+    return (
+        voxels_left,
+        voxels_right,
+        voxels_back,
+        voxels_front,
+        voxels_bot,
+        voxels_top,
+    )
+
+
+def make_verts_faces(
+    voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+):
     """Create vertices and faces from surface voxels.
 
     Parameters

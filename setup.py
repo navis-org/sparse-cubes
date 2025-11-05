@@ -20,13 +20,13 @@ setup(
     version=verstr,
     packages=find_packages(),
     license='GNU GPL V3',
-    description='Marching cubes on sparse matrices',
+    description='Mesh generation from sparse matrices using dual contouring',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/navis-org/sparse-cubes',
     author='Philipp Schlegel',
     author_email='pms70@cam.ac.uk',
-    keywords='marching cubes sparse matrix voxel',
+    keywords='dual contouring marching cubes sparse matrix voxel meshing',
     classifiers=[
         'Development Status :: 3 - Alpha',
 

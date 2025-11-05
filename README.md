@@ -1,26 +1,35 @@
 # sparse-cubes
-Marching cubes for `(N, 3)` voxel indices - i.e. the equivalent of a 3D
-sparse matrix in COOrdinate format.
 
-Running marching cubes directly on sparse voxels is faster and importantly much
-more memory efficient than converting to a 3d matrix and using the implementation
-in e.g. `sklearn`.
+Mesh generation from cubes for `(N, 3)` voxel indices - i.e. the equivalent of a 3D
+sparse matrix in COOrdinate format - using a simple dual contouring implementation
 
-The only dependencies are `numpy` and `trimesh`. Will use `fastremap` if present.
+Running dual contouring directly on sparse voxels is faster and importantly much
+more memory efficient than converting to a 3d matrix and using marching cubes from
+e.g. `sklearn`.
+
+In brief, dual contouring produces sharper meshes than marching cubes
+by placing vertices at the edges of voxels rather than the centers:
+
+![dual contouring example](_static/dual_contouring.png)
+
+Please see [this blog](https://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/) for an excellent introduction to dual contouring.
+See also notes at the end of the README.
 
 ## Install
 
 Install latest version from PyPI:
 
-```
+```bash
 pip3 install sparse-cubes -U
 ```
 
-To install developer version from Github:
+To install the developer version from Github:
 
-```
+```bash
 pip3 install git+https://github.com/navis-org/sparse-cubes.git
 ```
+
+The only dependencies are `numpy` and `trimesh`. Will use `fastremap` if present.
 
 ## Usage
 
@@ -31,7 +40,7 @@ pip3 install git+https://github.com/navis-org/sparse-cubes.git
 >>> voxel_xyz = np.array([[0, 0, 0],
 ...                       [0, 0, 1]],
 ...                      dtype='uint32')
->>> m = sc.marching_cubes(voxel_xyz)
+>>> m = sc.dual_contour(voxel_xyz)
 >>> m
 <trimesh.Trimesh(vertices.shape=(12, 3), faces.shape=(20, 3))>
 >>> m.is_winding_consistent
@@ -41,4 +50,5 @@ True
 ## Notes
 - The mesh might have non-manifold edges. Trimesh will report these
   meshes as not watertight but in the very literal definition they do hold water.
-- Currently only full edges.
+- This implementation is very basic; I never looked into how to optimize vertex
+  placement which is why we get a stepped appearance on diagonal surfaces.
