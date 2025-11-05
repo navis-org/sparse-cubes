@@ -10,7 +10,11 @@ e.g. `sklearn`.
 In brief, dual contouring produces sharper meshes than marching cubes
 by placing vertices at the edges of voxels rather than the centers:
 
-![dual contouring example](_static/dual_contouring.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="_static/dual_contouring_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="_static/dual_contouring.png">
+  <img alt="Dual Contouring Example" src="_static/dual_contouring.png">
+</picture>
 
 Please see [this blog](https://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/) for an excellent introduction to dual contouring.
 See also notes at the end of the README.
