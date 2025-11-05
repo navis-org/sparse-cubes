@@ -1,10 +1,10 @@
 # sparse-cubes
 
-Mesh generation from cubes for `(N, 3)` voxel indices - i.e. the equivalent of a 3D
+Mesh generation for `(N, 3)` voxel indices - i.e. the equivalent of a 3D
 sparse matrix in COOrdinate format - using a simple dual contouring implementation
 
 Running dual contouring directly on sparse voxels is faster and importantly much
-more memory efficient than converting to a 3d matrix and using marching cubes from
+more memory efficient than converting to a dense 3d matrix and using marching cubes from
 e.g. `sklearn`.
 
 In brief, dual contouring produces sharper meshes than marching cubes
