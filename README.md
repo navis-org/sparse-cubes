@@ -1,14 +1,31 @@
 # sparse-cubes
 
 Mesh generation for `(N, 3)` voxel indices - i.e. the equivalent of a 3D
-sparse matrix in COOrdinate format - using a simple dual contouring implementation
+sparse matrix in COOrdinate format.
 
-Running dual contouring directly on sparse voxels is faster and importantly much
-more memory efficient than converting to a dense 3d matrix and using marching cubes from
-e.g. `sklearn`.
+`sparse-cubes` works directly on the sparse surface voxels which is faster and,
+importantly, much more memory efficient than converting to a dense 3D matrix and
+using e.g. marching cubes from `scikit-image`. Memory scales with the number of
+*surface* voxels rather than the volume's bounding box.
 
-In brief, dual contouring produces sharper meshes than marching cubes
-by placing vertices at the edges of voxels rather than the centers:
+## Meshing modes
+
+`sparse-cubes` finds the exposed faces of your voxels and turns them into a
+mesh. There are two ways to place the vertices, selected with the `smooth`
+flag on `mesh()` (or via the explicit `surface_nets()` / `culled_faces()`
+functions):
+
+- **Smooth (`sc.mesh(voxels)` / `sc.surface_nets(voxels)`, the default).** A
+  naive [SurfaceNets](https://0fps.net/2012/07/12/smooth-voxel-terrain-part-2/)
+  pass: one vertex per surface cell, placed at the centroid of the surface
+  crossings around it. This is a *dual* method (a cousin of dual contouring) and
+  smooths the staircase you would otherwise get on diagonal surfaces. Vertices
+  are floats.
+- **Blocky (`sc.mesh(voxels, smooth=False)` / `sc.culled_faces(voxels)`).** Each
+  exposed voxel face becomes an axis-aligned quad with corners on the integer
+  voxel grid ("culled cube faces", à la Minecraft). Fast and keeps the input
+  integer dtype, but diagonal surfaces come out as 90° steps. This is the
+  historical output.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="_static/dual_contouring_dark.png">
@@ -16,7 +33,7 @@ by placing vertices at the edges of voxels rather than the centers:
   <img alt="Dual Contouring Example" src="_static/dual_contouring.png">
 </picture>
 
-Please see [this blog](https://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/) for an excellent introduction to dual contouring.
+Please see [this blog](https://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/) for an excellent introduction to dual contouring and SurfaceNets.
 See also notes at the end of the README.
 
 ## Install
@@ -44,15 +61,26 @@ The only dependencies are `numpy` and `trimesh`. Will use `fastremap` if present
 >>> voxel_xyz = np.array([[0, 0, 0],
 ...                       [0, 0, 1]],
 ...                      dtype='uint32')
->>> m = sc.dual_contour(voxel_xyz)
+>>> # Smooth (SurfaceNets) mesh by default; vertices are floats
+>>> m = sc.mesh(voxel_xyz)
 >>> m
 <trimesh.Trimesh(vertices.shape=(12, 3), faces.shape=(20, 3))>
 >>> m.is_winding_consistent
 True
+>>> # Pass smooth=False (or call sc.culled_faces) for the blocky, integer mesh
+>>> m_blocky = sc.mesh(voxel_xyz, smooth=False)
 ```
+
+`sc.dual_contour` and `sc.marching_cubes` still exist as **deprecated aliases**
+of `sc.mesh` (their old `interpolate` argument maps to `smooth`) but emit a
+`DeprecationWarning` - neither name ever described what this library actually
+does.
 
 ## Notes
 - The mesh might have non-manifold edges. Trimesh will report these
   meshes as not watertight but in the very literal definition they do hold water.
-- This implementation is very basic; I never looked into how to optimize vertex
-  placement which is why we get a stepped appearance on diagonal surfaces.
+- The names `dual_contour` / `marching_cubes` were misnomers: the blocky path is
+  really culled cube faces (vertices only ever land on cube corners) and the
+  smooth default is naive dual/SurfaceNets placement. Full feature-preserving
+  dual contouring (QEF-based placement using surface normals) is not
+  implemented.

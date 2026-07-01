@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import trimesh as tm
 
@@ -17,32 +19,48 @@ INT_DTYPES = (np.int64, np.int32, np.int16, np.uint64, np.uint32, np.uint16)
 class Trimesh(tm.Trimesh):
     @property
     def vertices(self):
-        return self._data.get("vertices", np.empty(shape=(0, 3), dtype=np.uint32))
+        # Check if vertices exist and return with appropriate dtype
+        verts = self._data.get("vertices", None)
+        if verts is None:
+            return np.empty(shape=(0, 3), dtype=np.uint32)
+        return verts
 
     @vertices.setter
     def vertices(self, values):
         self._data["vertices"] = np.asanyarray(values, order="C")
 
 
-def marching_cubes(voxels, spacing=None, step_size=1, verbose=False):
-    """Alias for dual_contour. Kept for backwards compatibility."""
-    return dual_contour(voxels, spacing=spacing, step_size=step_size, verbose=verbose)
+def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True):
+    """Generate a surface mesh from sparse `(N, 3)` voxel indices.
 
+    Works directly on the sparse surface voxels (memory ~ number of surface
+    voxels), so it avoids densifying to a 3D grid the way marching cubes would.
 
-def dual_contour(voxels, spacing=None, step_size=1, verbose=False):
-    """Dual contouring algorithm to find surfaces in 2d voxel data.
+    Two vertex-placement modes are available via `smooth`:
 
-    Important
-    ---------
-    The
+    - Smooth (``smooth=True``, the default): naive SurfaceNets. One vertex per
+      surface cell, placed at the centroid of the surface crossings around it.
+      This is a *dual* method (a cousin of dual contouring) and smooths the
+      staircase you would otherwise get on diagonal surfaces. Vertices are
+      floats. See also `surface_nets`.
+    - Blocky (``smooth=False``): each exposed voxel face becomes an axis-aligned
+      quad with corners on the integer voxel grid ("culled cube faces", à la
+      Minecraft). Diagonal surfaces come out as 90 degree steps, but vertices
+      keep the input integer dtype. This is the historical output. See also
+      `culled_faces`.
+
+    Neither mode is true dual contouring or marching cubes: vertices land either
+    on cube corners (blocky) or at edge-crossing centroids (smooth), not via the
+    QEF/normal-based placement of feature-preserving dual contouring.
 
     Parameters
     ----------
     voxels :    (N, 3) array of integers
-                XYZ voxel coordinates (indices) to find isosurfaces for. The
-                data type should carry over to the mesh vertices - i.e. if
-                `voxels` are unsigned 32-bit integers, the mesh vertex
-                coordinates should also end up being unsigned 32-bit integers.
+                XYZ voxel coordinates (indices) to find isosurfaces for. On the
+                blocky path (``smooth=False``) the data type carries over to the
+                mesh vertices - i.e. if `voxels` are unsigned 32-bit integers,
+                the mesh vertex coordinates are too. The smooth path always
+                produces float vertices.
     spacing :   length-3 tuple of floats, optional
                 Voxel spacing in spatial dimensions corresponding to numpy array
                 indexing dimensions as in `voxels`. Note that the data type of
@@ -54,6 +72,19 @@ def dual_contour(voxels, spacing=None, step_size=1, verbose=False):
                 results.
     verbose :   bool
                 If True, will provide some feedback on progress.
+    smooth :    bool, optional
+                If True (default), use naive SurfaceNets placement: one vertex
+                per active dual cell, positioned at the centroid of that cell's
+                surface-crossing edges. This smooths the staircase on diagonal
+                surfaces at the cost of a small constant-factor slowdown. Note
+                that vertices are floats on this path (they are generally
+                half-integer or finer), so the integer-dtype optimisation of
+                the blocky path does not apply.
+                If False, each exposed voxel face instead becomes an
+                axis-aligned quad with corners on integer voxel coordinates -
+                i.e. a blocky mesh with 90 degree steps on diagonal surfaces.
+                This output is byte-identical to versions <= 0.2.0 and keeps
+                the input integer dtype.
 
     Returns
     -------
@@ -88,9 +119,14 @@ def dual_contour(voxels, spacing=None, step_size=1, verbose=False):
 
     # Generate vertices + faces
     log("Generating vertices and faces... ", end="", flush=True, verbose=verbose)
-    verts, faces = make_verts_faces(
-        voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
-    )
+    if smooth:
+        verts, faces = make_surface_nets(
+            voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+        )
+    else:
+        verts, faces = make_culled_faces(
+            voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+        )
     log("Done.", flush=True, verbose=verbose)
 
     # Create mesh
@@ -98,10 +134,13 @@ def dual_contour(voxels, spacing=None, step_size=1, verbose=False):
     m = Trimesh(verts, faces, process=False)
     log("Done.", flush=True, verbose=verbose)
 
-    # Collapse vertices
-    log("Merging vertices... ", end="", flush=True, verbose=verbose)
-    tm.grouping.merge_vertices(m, digits_vertex=0, merge_tex=True, merge_norm=True)
-    log("Done.", flush=True, verbose=verbose)
+    # Collapse vertices. The smooth path already emits one vertex per active
+    # dual cell (dedup comes for free via the cell -> vertex index map), so we
+    # only need to merge on the blocky path.
+    if not smooth:
+        log("Merging vertices... ", end="", flush=True, verbose=verbose)
+        tm.grouping.merge_vertices(m, digits_vertex=0, merge_tex=True, merge_norm=True)
+        log("Done.", flush=True, verbose=verbose)
 
     # Apply spacing after we collapse duplicate vertices
     if not isinstance(spacing, type(None)):
@@ -109,6 +148,72 @@ def dual_contour(voxels, spacing=None, step_size=1, verbose=False):
 
     log("All done!", flush=True, verbose=verbose)
     return m
+
+
+def surface_nets(voxels, spacing=None, step_size=1, verbose=False):
+    """Smooth (naive SurfaceNets) surface mesh from sparse voxels.
+
+    Thin wrapper around ``mesh(..., smooth=True)``. See `mesh` for details.
+    """
+    return mesh(
+        voxels, spacing=spacing, step_size=step_size, verbose=verbose, smooth=True
+    )
+
+
+def culled_faces(voxels, spacing=None, step_size=1, verbose=False):
+    """Blocky (culled cube faces) surface mesh from sparse voxels.
+
+    Thin wrapper around ``mesh(..., smooth=False)``. See `mesh` for details.
+    """
+    return mesh(
+        voxels, spacing=spacing, step_size=step_size, verbose=verbose, smooth=False
+    )
+
+
+def dual_contour(voxels, spacing=None, step_size=1, verbose=False, interpolate=True):
+    """Deprecated, misnamed alias for `mesh` (this is not dual contouring).
+
+    .. deprecated::
+        Use `mesh` (or the explicit `surface_nets` / `culled_faces`) instead.
+        The `interpolate` argument maps to `smooth`.
+    """
+    warnings.warn(
+        "`dual_contour` is deprecated and misnamed - this library does not "
+        "implement dual contouring. Use `mesh(..., smooth=...)` instead "
+        "(or `surface_nets` / `culled_faces`).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return mesh(
+        voxels,
+        spacing=spacing,
+        step_size=step_size,
+        verbose=verbose,
+        smooth=interpolate,
+    )
+
+
+def marching_cubes(voxels, spacing=None, step_size=1, verbose=False, interpolate=True):
+    """Deprecated, misnamed alias for `mesh` (this is not marching cubes).
+
+    .. deprecated::
+        Use `mesh` (or the explicit `surface_nets` / `culled_faces`) instead.
+        The `interpolate` argument maps to `smooth`.
+    """
+    warnings.warn(
+        "`marching_cubes` is deprecated and misnamed - this library does not "
+        "implement marching cubes. Use `mesh(..., smooth=...)` instead "
+        "(or `surface_nets` / `culled_faces`).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return mesh(
+        voxels,
+        spacing=spacing,
+        step_size=step_size,
+        verbose=verbose,
+        smooth=interpolate,
+    )
 
 
 def sort_cols(a, order=[0, 1, 2]):
@@ -276,10 +381,10 @@ def surface_voxel_mask(voxels):
     )
 
 
-def make_verts_faces(
+def make_culled_faces(
     voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
 ):
-    """Create vertices and faces from surface voxels.
+    """Create vertices and faces as culled cube faces (blocky mesh).
 
     Parameters
     ----------
@@ -378,6 +483,137 @@ def make_verts_faces(
 
     verts = np.vstack(verts)
     faces = np.vstack(faces)
+
+    return verts, faces
+
+
+# Ordered lower-corner offsets of the 4 dual cells that share a surface-crossing
+# edge, keyed by the edge's axis (0=X, 1=Y, 2=Z). The order is CCW as seen
+# looking down the +axis, so a crossing whose filled voxel sits on the low side
+# of the edge (positive normal) winds outwards. Derived once per axis via the
+# right-hand rule: for axis `a` the in-plane axes (u, v) are the cyclic pair with
+# u x v = a, i.e. (Y, Z), (Z, X) and (X, Y).
+_CELL_OFFSETS = np.array(
+    [
+        [[0, -1, -1], [0, 0, -1], [0, 0, 0], [0, -1, 0]],  # X-edge, plane (Y, Z)
+        [[-1, 0, -1], [-1, 0, 0], [0, 0, 0], [0, 0, -1]],  # Y-edge, plane (Z, X)
+        [[-1, -1, 0], [0, -1, 0], [0, 0, 0], [-1, 0, 0]],  # Z-edge, plane (X, Y)
+    ],
+    dtype=np.int64,
+)
+
+
+def pack(xyz):
+    """Pack non-negative integer XYZ coordinates into a single int64 key.
+
+    Each axis must be non-negative and < 2**21. Used as an exact hash for
+    membership / dedup so we never rely on float vertex equality.
+    """
+    x, y, z = xyz.T.astype(np.int64)
+    return (x << 42) | (y << 21) | z
+
+
+def make_surface_nets(
+    voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+):
+    """Create vertices and faces using naive SurfaceNets placement.
+
+    Treats voxel occupancy as the samples (outside the set = empty). Each
+    exposed voxel face is a surface-crossing edge ``(p, p + e)`` between a
+    filled and an empty sample. Every crossing edge is shared by exactly four
+    dual cells; each such cell is active (mixed corners) and gets one vertex at
+    the centroid of its crossing-edge midpoints. The four cells around an edge
+    are joined into a quad, wound by the crossing's sign.
+
+    This reuses the six directional exposed-face sets from
+    ``find_surface_voxels`` and stays sparse (memory ~ surface voxels): no dense
+    grid and no per-voxel Python loop.
+
+    Parameters
+    ----------
+    voxels_ :   (N, 3) numpy array
+
+    Returns
+    -------
+    vertices :  (M, 3) float array
+    faces :     (K, 3) int array
+
+    """
+    # Unit basis vectors (int64 so subtraction on unsigned inputs can't wrap).
+    basis = np.eye(3, dtype=np.int64)
+
+    # Each exposed face is a crossing edge (p, p + e_axis) with `p` the endpoint
+    # of lower coordinate along `axis`. sign = +1 when the filled voxel sits at
+    # `p` (outward normal points +axis), -1 when it sits at `p + e_axis`.
+    specs = [
+        (voxels_right, 0, +1),  # +X face of a voxel  -> p = v
+        (voxels_left, 0, -1),   # -X face of a voxel  -> p = v - e_x
+        (voxels_top, 1, +1),    # +Y face of a voxel  -> p = v
+        (voxels_bot, 1, -1),    # -Y face of a voxel  -> p = v - e_y
+        (voxels_back, 2, +1),   # +Z face of a voxel  -> p = v
+        (voxels_front, 2, -1),  # -Z face of a voxel  -> p = v - e_z
+    ]
+
+    p_list, axis_list, sign_list, mid2_list = [], [], [], []
+    for V, a, s in specs:
+        if len(V) == 0:
+            continue
+        V = V.astype(np.int64, copy=False)
+        e = basis[a]
+        p = V if s > 0 else V - e
+        p_list.append(p)
+        # Midpoint in x2 integer units: 2 * p + e (integer, exact).
+        mid2_list.append(2 * p + e)
+        axis_list.append(np.full(len(V), a, dtype=np.int64))
+        sign_list.append(np.full(len(V), s, dtype=np.int64))
+
+    if not p_list:
+        return (
+            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 3), dtype=np.int64),
+        )
+
+    P = np.vstack(p_list)          # (E, 3) lower point of each crossing edge
+    mid2 = np.vstack(mid2_list)    # (E, 3) edge midpoint x2
+    axis = np.concatenate(axis_list)  # (E,)
+    sign = np.concatenate(sign_list)  # (E,)
+    n_edges = len(P)
+
+    # Expand each edge into its 4 sharing dual cells (lower corners), keeping the
+    # CCW-for-+normal ordering so we can also use it for winding below.
+    cells = P[:, None, :] + _CELL_OFFSETS[axis]  # (E, 4, 3)
+    flat_cells = cells.reshape(-1, 3)            # (E*4, 3)
+
+    # Dedup cells -> vertex index via an exact integer key. Shift to keep every
+    # coordinate non-negative (stencil corners can reach one below the minimum).
+    shift = flat_cells.min(axis=0)
+    keys = pack(flat_cells - shift)
+    cell_keys = np.unique(keys)              # sorted unique cell keys
+    n_cells = len(cell_keys)
+    vidx = np.searchsorted(cell_keys, keys)  # (E*4,) vertex index per incidence
+
+    # Vertex = mean of the midpoints of the cell's crossing edges. Accumulate the
+    # x2-integer midpoints per cell (bincount is faster than np.add.at), then
+    # divide by the count and scale by 0.5 to leave x2 units -> float verts.
+    mid2_rep = np.repeat(mid2, 4, axis=0)  # (E*4, 3) edge midpoint for each cell
+    counts = np.bincount(vidx, minlength=n_cells)
+    sums = np.stack(
+        [
+            np.bincount(vidx, weights=mid2_rep[:, k], minlength=n_cells)
+            for k in range(3)
+        ],
+        axis=1,
+    )
+    verts = sums / counts[:, None] * 0.5
+
+    # Faces: the 4 cells per edge in winding order (reversed for -normal), split
+    # into two triangles.
+    quad = vidx.reshape(n_edges, 4)
+    neg = sign < 0
+    quad[neg] = quad[neg][:, [0, 3, 2, 1]]
+    faces = np.empty((n_edges * 2, 3), dtype=np.int64)
+    faces[0::2] = quad[:, [0, 1, 2]]
+    faces[1::2] = quad[:, [0, 2, 3]]
 
     return verts, faces
 
