@@ -30,7 +30,7 @@ class Trimesh(tm.Trimesh):
         self._data["vertices"] = np.asanyarray(values, order="C")
 
 
-def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True):
+def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify=False):
     """Generate a surface mesh from sparse `(N, 3)` voxel indices.
 
     Works directly on the sparse surface voxels (memory ~ number of surface
@@ -85,6 +85,15 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True):
                 i.e. a blocky mesh with 90 degree steps on diagonal surfaces.
                 This output is byte-identical to versions <= 0.2.0 and keeps
                 the input integer dtype.
+    simplify :  bool, optional
+                Only used on the blocky path (``smooth=False``). If True, merge
+                coplanar adjacent faces into maximal rectangles (greedy meshing).
+                This is lossless - the covered surface is unchanged - and
+                typically produces ~2x fewer triangles, which usually makes it
+                *faster* than the un-simplified blocky path (fewer vertices to
+                merge). See `greedy_faces`. Caveat: greedy meshing can introduce
+                T-junctions, so the result may be "less watertight" than the
+                per-face mesh. Ignored (with a warning) when ``smooth=True``.
 
     Returns
     -------
@@ -99,6 +108,13 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True):
         raise TypeError(f'Expected numpy array of shape (N, 3), got "{voxels.shape}"')
     elif voxels.dtype not in INT_DTYPES:
         raise TypeError(f"Expected integer dtype, got {voxels.dtype}")
+
+    if simplify and smooth:
+        warnings.warn(
+            "`simplify` has no effect on the smooth path; ignoring.",
+            stacklevel=2,
+        )
+        simplify = False
 
     if not isinstance(spacing, type(None)):
         spacing = np.array(spacing)
@@ -121,6 +137,10 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True):
     log("Generating vertices and faces... ", end="", flush=True, verbose=verbose)
     if smooth:
         verts, faces = make_surface_nets(
+            voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+        )
+    elif simplify:
+        verts, faces = make_greedy_faces(
             voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
         )
     else:
@@ -160,13 +180,36 @@ def surface_nets(voxels, spacing=None, step_size=1, verbose=False):
     )
 
 
-def culled_faces(voxels, spacing=None, step_size=1, verbose=False):
+def culled_faces(voxels, spacing=None, step_size=1, verbose=False, simplify=False):
     """Blocky (culled cube faces) surface mesh from sparse voxels.
 
-    Thin wrapper around ``mesh(..., smooth=False)``. See `mesh` for details.
+    Thin wrapper around ``mesh(..., smooth=False)``. Pass ``simplify=True`` (or
+    use `greedy_faces`) to merge coplanar faces. See `mesh` for details.
     """
     return mesh(
-        voxels, spacing=spacing, step_size=step_size, verbose=verbose, smooth=False
+        voxels,
+        spacing=spacing,
+        step_size=step_size,
+        verbose=verbose,
+        smooth=False,
+        simplify=simplify,
+    )
+
+
+def greedy_faces(voxels, spacing=None, step_size=1, verbose=False):
+    """Simplified blocky mesh with coplanar faces merged (greedy meshing).
+
+    Thin wrapper around ``mesh(..., smooth=False, simplify=True)``. Lossless
+    (covered surface unchanged) and typically ~2x fewer triangles. See `mesh`
+    and `make_greedy_faces` for details and caveats (e.g. T-junctions).
+    """
+    return mesh(
+        voxels,
+        spacing=spacing,
+        step_size=step_size,
+        verbose=verbose,
+        smooth=False,
+        simplify=True,
     )
 
 
@@ -485,6 +528,161 @@ def make_culled_faces(
     faces = np.vstack(faces)
 
     return verts, faces
+
+
+# Per-direction geometry for greedy meshing, indexed by dir_id in the order
+# (left, right, bot, top, front, back). For each direction:
+#   - plane axis: the axis held constant across the face,
+#   - uax / vax: the two in-plane axes; uax carries the "corner 1" offset and
+#     vax the "corner 2" offset - matching make_culled_faces exactly,
+#   - plane offset: +1 for the high-side faces (right / top / back),
+#   - tri CCW: whether the quad winds CCW ([[0,1,3],[0,3,2]]) or CW
+#     ([[3,1,0],[2,3,0]]).
+# A merged rectangle is just a unit quad with its two spanning offsets scaled,
+# so reusing this recipe keeps the winding/normals identical to the blocky mesh.
+_GREEDY_PLANE_AXIS = np.array([0, 0, 1, 1, 2, 2])
+_GREEDY_UAX = np.array([1, 1, 0, 0, 0, 0])
+_GREEDY_VAX = np.array([2, 2, 2, 2, 1, 1])
+_GREEDY_PLANE_OFFSET = np.array([0, 1, 0, 1, 0, 1])
+_GREEDY_TRI_CCW = np.array([True, False, False, True, True, False])
+_FACE_CCW = np.array([[0, 1, 3], [0, 3, 2]])
+_FACE_CW = np.array([[3, 1, 0], [2, 3, 0]])
+
+
+def make_greedy_faces(
+    voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
+):
+    """Create vertices and faces as merged coplanar rectangles (greedy meshing).
+
+    Lossless simplification of the blocky (culled cube faces) mesh: coplanar
+    adjacent faces are merged into maximal rectangles, so a flat W x H region
+    becomes a single quad instead of W*H quads. Reuses the six directional
+    exposed-face sets, stays fully vectorised (no per-voxel loop, no dense grid),
+    and keeps integer rectangle corners so the vertex dtype is preserved.
+
+    Each plane's cells are decomposed into rectangles in two passes: a horizontal
+    run-length encode (merge along `u` within a row) followed by merging vertically
+    adjacent strips of identical `[u0, u1]` extent (merge along `v`). Both passes
+    are exact partitions, so the result covers exactly the same surface.
+
+    Note: like all greedy meshing this can introduce T-junctions where a large
+    rectangle borders a differently subdivided region, so the result may be
+    "less watertight" than the per-face mesh even though the covered area is
+    identical.
+
+    Parameters
+    ----------
+    voxels_ :   (N, 3) numpy array
+
+    Returns
+    -------
+    vertices :  (M, 3) array
+    faces :     (K, 3) array
+
+    """
+    orig_dtype = voxels_left.dtype
+
+    # (voxel set, plane_axis, uax, vax) in dir_id order.
+    specs = [
+        (voxels_left, 0, 1, 2),
+        (voxels_right, 0, 1, 2),
+        (voxels_bot, 1, 0, 2),
+        (voxels_top, 1, 0, 2),
+        (voxels_front, 2, 0, 1),
+        (voxels_back, 2, 0, 1),
+    ]
+
+    d_list, plane_list, u_list, v_list = [], [], [], []
+    for dir_id, (V, pax, uax, vax) in enumerate(specs):
+        if len(V) == 0:
+            continue
+        V = V.astype(np.int64, copy=False)
+        d_list.append(np.full(len(V), dir_id, dtype=np.int64))
+        plane_list.append(V[:, pax])
+        u_list.append(V[:, uax])
+        v_list.append(V[:, vax])
+
+    if not d_list:
+        return (
+            np.empty((0, 3), dtype=orig_dtype),
+            np.empty((0, 3), dtype=np.int64),
+        )
+
+    d = np.concatenate(d_list)
+    plane = np.concatenate(plane_list)
+    u = np.concatenate(u_list)
+    v = np.concatenate(v_list)
+
+    # Pass 1: horizontal run-length encode. A strip breaks where the direction,
+    # plane or row (v) changes, or where u is no longer contiguous.
+    order = np.lexsort((u, v, plane, d))
+    d, plane, u, v = d[order], plane[order], u[order], v[order]
+    new_strip = np.ones(len(u), dtype=bool)
+    new_strip[1:] = (
+        (d[1:] != d[:-1])
+        | (plane[1:] != plane[:-1])
+        | (v[1:] != v[:-1])
+        | (u[1:] != u[:-1] + 1)
+    )
+    firsts = np.flatnonzero(new_strip)
+    lasts = np.r_[firsts[1:] - 1, len(u) - 1]
+    s_d, s_plane, s_v = d[firsts], plane[firsts], v[firsts]
+    s_u0, s_u1 = u[firsts], u[lasts]
+
+    # Pass 2: merge vertically adjacent strips of identical [u0, u1] extent. A
+    # rectangle breaks where direction, plane or the u-extent changes, or where v
+    # is no longer contiguous.
+    order2 = np.lexsort((s_v, s_u1, s_u0, s_plane, s_d))
+    s_d, s_plane, s_u0, s_u1, s_v = (
+        s_d[order2],
+        s_plane[order2],
+        s_u0[order2],
+        s_u1[order2],
+        s_v[order2],
+    )
+    new_rect = np.ones(len(s_v), dtype=bool)
+    new_rect[1:] = (
+        (s_d[1:] != s_d[:-1])
+        | (s_plane[1:] != s_plane[:-1])
+        | (s_u0[1:] != s_u0[:-1])
+        | (s_u1[1:] != s_u1[:-1])
+        | (s_v[1:] != s_v[:-1] + 1)
+    )
+    rf = np.flatnonzero(new_rect)
+    rl = np.r_[rf[1:] - 1, len(s_v) - 1]
+    r_d = s_d[rf]
+    r_plane = s_plane[rf]
+    r_u0, r_u1 = s_u0[rf], s_u1[rf]
+    r_v0, r_v1 = s_v[rf], s_v[rl]
+    R = len(r_d)
+
+    # Emit 4 integer corners + 2 triangles per rectangle, all vectorised.
+    pax = _GREEDY_PLANE_AXIS[r_d]
+    uax = _GREEDY_UAX[r_d]
+    vax = _GREEDY_VAX[r_d]
+    poff = _GREEDY_PLANE_OFFSET[r_d]
+    rows = np.arange(R)
+
+    base = np.zeros((R, 3), dtype=np.int64)
+    base[rows, pax] = r_plane + poff
+    base[rows, uax] = r_u0
+    base[rows, vax] = r_v0
+
+    uvec = np.zeros((R, 3), dtype=np.int64)
+    uvec[rows, uax] = r_u1 - r_u0 + 1  # rectangle width along uax
+    vvec = np.zeros((R, 3), dtype=np.int64)
+    vvec[rows, vax] = r_v1 - r_v0 + 1  # rectangle height along vax
+
+    verts = np.empty((R * 4, 3), dtype=np.int64)
+    verts[0::4] = base
+    verts[1::4] = base + uvec
+    verts[2::4] = base + vvec
+    verts[3::4] = base + uvec + vvec
+
+    single_face = np.where(_GREEDY_TRI_CCW[r_d][:, None, None], _FACE_CCW, _FACE_CW)
+    faces = (single_face + (rows * 4)[:, None, None]).reshape(-1, 3)
+
+    return verts.astype(orig_dtype, copy=False), faces
 
 
 # Ordered lower-corner offsets of the 4 dual cells that share a surface-crossing

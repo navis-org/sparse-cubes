@@ -176,3 +176,88 @@ def test_smooth_no_perf_regression():
     m = sc.mesh(voxels, smooth=True)
     assert m.is_winding_consistent
     assert smooth < blocky * 5
+
+
+def _slab(k):
+    """A k x k x 1 flat slab of voxels in the z=0 plane."""
+    xs, ys = np.meshgrid(np.arange(k), np.arange(k))
+    return np.stack(
+        [xs.ravel(), ys.ravel(), np.zeros(k * k, dtype=int)], axis=1
+    ).astype(np.uint32)
+
+
+def test_greedy_is_lossless():
+    # Greedy meshing merges coplanar faces without changing the covered surface:
+    # total area is identical (winding-independent coverage proxy), faces only
+    # ever go down, and the small clean fixtures stay winding-consistent.
+    for voxels in (SINGLE, LSHAPE, CUBE, DIAG_STAIR):
+        blocky = sc.mesh(voxels, smooth=False)
+        greedy = sc.mesh(voxels, smooth=False, simplify=True)
+
+        assert greedy.area == pytest.approx(blocky.area)          # lossless coverage
+        assert greedy.faces.shape[0] <= blocky.faces.shape[0]     # never more faces
+        assert greedy.is_winding_consistent                       # no T-junctions here
+        assert all_axis_aligned(greedy.face_normals)              # still axis-aligned
+
+        verts = np.asarray(greedy.vertices)
+        assert verts.dtype == voxels.dtype                        # integer dtype kept
+        assert np.array_equal(verts, verts.astype(np.int64))      # on integer corners
+
+
+def test_greedy_slab_reduction():
+    # A flat k x k x 1 slab collapses to 6 rectangles (top, bottom, 4 sides) =
+    # 12 triangles regardless of k, vs 2*(2*k^2 + 4*k) for the per-face mesh.
+    slab = _slab(4)
+    blocky = sc.mesh(slab, smooth=False)
+    greedy = sc.mesh(slab, smooth=False, simplify=True)
+
+    assert greedy.faces.shape[0] == 12
+    assert blocky.faces.shape[0] == 2 * (2 * 4 * 4 + 4 * 4)
+    assert greedy.area == pytest.approx(blocky.area)
+
+
+def test_greedy_wrappers_match():
+    # greedy_faces() and culled_faces(simplify=True) are the explicit spellings
+    # of mesh(smooth=False, simplify=True).
+    direct = sc.mesh(CUBE, smooth=False, simplify=True)
+    for other in (sc.greedy_faces(CUBE), sc.culled_faces(CUBE, simplify=True)):
+        assert np.array_equal(np.asarray(other.vertices), np.asarray(direct.vertices))
+        assert np.array_equal(other.faces, direct.faces)
+
+
+def test_simplify_ignored_on_smooth_path():
+    # simplify only applies to the blocky path; with smooth=True it warns and
+    # returns the normal smooth mesh unchanged.
+    with pytest.warns(UserWarning):
+        m = sc.mesh(CUBE, smooth=True, simplify=True)
+
+    plain = sc.mesh(CUBE, smooth=True)
+    assert np.array_equal(np.asarray(m.vertices), np.asarray(plain.vertices))
+    assert np.array_equal(m.faces, plain.faces)
+
+
+@pytest.mark.skipif(not os.path.exists(DATA), reason="test voxel cloud not available")
+def test_greedy_no_perf_regression():
+    # On a real (~40k voxel) cloud greedy meshing must (a) be lossless, (b) cut
+    # the triangle count substantially, and (c) stay cheap - within a small
+    # factor of the un-simplified blocky path (it is typically ~parity).
+    voxels = np.load(DATA)
+
+    def best(simplify):
+        sc.mesh(voxels, smooth=False, simplify=simplify)  # warmup
+        times = []
+        for _ in range(3):
+            t0 = time.perf_counter()
+            sc.mesh(voxels, smooth=False, simplify=simplify)
+            times.append(time.perf_counter() - t0)
+        return min(times)
+
+    blocky_t = best(False)
+    greedy_t = best(True)
+
+    blocky = sc.mesh(voxels, smooth=False)
+    greedy = sc.mesh(voxels, smooth=False, simplify=True)
+
+    assert greedy.area == pytest.approx(blocky.area)                    # lossless
+    assert greedy.faces.shape[0] < blocky.faces.shape[0] * 0.7          # real cut
+    assert greedy_t < blocky_t * 2                                      # still cheap

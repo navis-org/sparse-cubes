@@ -27,6 +27,23 @@ functions):
   integer dtype, but diagonal surfaces come out as 90° steps. This is the
   historical output.
 
+### Optional simplification (blocky only)
+
+Pass `simplify=True` (or use `sc.greedy_faces(voxels)`) to merge coplanar faces
+of the blocky mesh into maximal rectangles
+([greedy meshing](https://0fps.net/2012/06/30/meshing-in-a-minecraft-game/)):
+
+```python
+>>> full = sc.mesh(voxels, smooth=False)
+>>> small = sc.mesh(voxels, smooth=False, simplify=True)  # ~2x fewer triangles
+```
+
+This is **lossless** - the covered surface is identical - and keeps the integer
+vertex dtype. It typically roughly halves the triangle count (a flat W×H wall
+becomes a single quad instead of W·H quads) at little to no extra cost. Caveat:
+like all greedy meshing it can introduce T-junctions, so the simplified mesh may
+be "less watertight" than the per-face mesh; it is opt-in for that reason.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="_static/dual_contouring_dark.png">
   <source media="(prefers-color-scheme: light)" srcset="_static/dual_contouring.png">
@@ -69,6 +86,8 @@ The only dependencies are `numpy` and `trimesh`. Will use `fastremap` if present
 True
 >>> # Pass smooth=False (or call sc.culled_faces) for the blocky, integer mesh
 >>> m_blocky = sc.mesh(voxel_xyz, smooth=False)
+>>> # ...and simplify=True (or sc.greedy_faces) to merge coplanar faces losslessly
+>>> m_small = sc.mesh(voxel_xyz, smooth=False, simplify=True)
 ```
 
 `sc.dual_contour` and `sc.marching_cubes` still exist as **deprecated aliases**
