@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparse-cubes"
+dynamic = ["version"]
+description = "Surface mesh generation from sparse (N, 3) voxel indices"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GNU GPL V3" }
+authors = [{ name = "Philipp Schlegel", email = "pms70@cam.ac.uk" }]
+keywords = [
+    "surface nets",
+    "culled cube faces",
+    "sparse matrix",
+    "voxel",
+    "meshing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "numpy",
+    "trimesh",
+]
+
+[project.optional-dependencies]
+# dijkstra3d-sparse: optional but *highly recommended*. teasar_skeletonize
+# transparently uses it to run Dijkstra straight over the voxel coordinates,
+# which is markedly faster than the pure-scipy csgraph fallback. sparse-cubes
+# works without it (falls back to scipy), but installing it is strongly advised.
+recommended = ["dijkstra3d-sparse"]
+# scipy: per-node radii (cKDTree) and faster graph routines. Also pulls in the
+# recommended dijkstra3d-sparse accelerator so skeletonization is fast out of the box.
+skeleton = ["scipy", "dijkstra3d-sparse"]
+# networkx: Skeleton.to_networkx()
+graph = ["networkx"]
+# everything, including the recommended accelerator
+all = ["scipy", "networkx", "dijkstra3d-sparse"]
+# everything needed to run the test suite (incl. skimage cross-checks and the
+# dijkstra3d-sparse accelerator so its code path is exercised)
+test = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse"]
+dev = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse"]
+
+[project.urls]
+Homepage = "https://github.com/navis-org/sparse-cubes"
+Repository = "https://github.com/navis-org/sparse-cubes"
+
+[tool.setuptools]
+zip-safe = false
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["sparsecubes*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "sparsecubes.__version__.__version__" }

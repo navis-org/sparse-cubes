@@ -347,6 +347,31 @@ def find_surface_voxels(voxels):
     )
 
 
+def boundary_shell(voxels):
+    """The shell of background cells hugging the object's surface.
+
+    Each exposed face (from `find_surface_voxels`) stepped one voxel outward is a
+    background cell 6-adjacent to the surface; their union (deduplicated) is the
+    set of empty voxels immediately outside the object. The nearest such cell to
+    any object voxel is its nearest background voxel, i.e. an exact
+    distance-from-boundary (Euclidean distance transform) reference set that stays
+    sparse - it never densifies the bounding box. Used by both the skeleton radius
+    estimate and the TEASAR distance-from-boundary field.
+    """
+    left, right, back, front, bot, top = find_surface_voxels(voxels)
+    shell = np.vstack(
+        [
+            right + np.array([1, 0, 0]),
+            left + np.array([-1, 0, 0]),
+            top + np.array([0, 1, 0]),
+            bot + np.array([0, -1, 0]),
+            back + np.array([0, 0, 1]),
+            front + np.array([0, 0, -1]),
+        ]
+    )
+    return unique(shell, axis=0)
+
+
 def surface_voxel_mask(voxels):
     """Create mask for voxels.
 
@@ -701,14 +726,39 @@ _CELL_OFFSETS = np.array(
 )
 
 
-def pack(xyz):
+def pack(xyz, bits=(21, 21, 21)):
     """Pack non-negative integer XYZ coordinates into a single int64 key.
 
-    Each axis must be non-negative and < 2**21. Used as an exact hash for
-    membership / dedup so we never rely on float vertex equality.
+    Each axis must be non-negative and fit in its allotted number of bits.
+    Used as an exact hash for membership / dedup so we never rely on float
+    vertex equality.
+
+    Parameters
+    ----------
+    xyz :   (N, 3) array of non-negative integers
+    bits :  length-3 tuple, optional
+            Bits allotted to X, Y and Z respectively. The default ``(21, 21,
+            21)`` is byte-identical to the historical ``(x << 42) | (y << 21) |
+            z`` layout and keeps the key within a signed 63-bit range. The sum
+            must not exceed 63. Widen individual axes (keeping the sum <= 63) to
+            support coordinate ranges beyond 2**21 along a given axis.
     """
+    _bx, by, bz = bits
     x, y, z = xyz.T.astype(np.int64)
-    return (x << 42) | (y << 21) | z
+    return (x << (by + bz)) | (y << bz) | z
+
+
+def unpack(keys, bits=(21, 21, 21)):
+    """Inverse of `pack`: recover (N, 3) integer XYZ from packed int64 keys.
+
+    `bits` must match the value used to pack. See `pack` for details.
+    """
+    _bx, by, bz = bits
+    keys = np.asarray(keys, dtype=np.int64)
+    z = keys & ((1 << bz) - 1)
+    y = (keys >> bz) & ((1 << by) - 1)
+    x = keys >> (by + bz)
+    return np.stack([x, y, z], axis=1)
 
 
 def make_surface_nets(
