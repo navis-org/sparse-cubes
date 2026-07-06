@@ -372,6 +372,240 @@ def boundary_shell(voxels):
     return unique(shell, axis=0)
 
 
+# Packed-key deltas for the six face steps under pack()'s default (21, 21, 21)
+# layout: stepping one voxel along an axis just adds a constant to the key (no
+# carry between the 21-bit fields as long as coordinates stay in range).
+_FACE_KEY_DELTA = np.array(
+    [1 << 42, -(1 << 42), 1 << 21, -(1 << 21), 1, -1], dtype=np.int64
+)
+_POS_FACE_KEY_DELTA = np.array([1 << 42, 1 << 21, 1], dtype=np.int64)  # +x, +y, +z
+# The 13 positive-key offsets of the 26-neighbourhood (their mirrors are the
+# other 13); an undirected graph only needs one direction per pair.
+_POS26_KEY_DELTA = np.array(
+    sorted(
+        (dx << 42) + (dy << 21) + dz
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+        if (dx or dy or dz) and (dx << 42) + (dy << 21) + dz > 0
+    ),
+    dtype=np.int64,
+)
+_PACK_FIELD = 1 << 21  # per-axis capacity of the packed key
+
+
+def _sorted_hit(keys, ref_sorted):
+    """Boolean mask: which `keys` are present in the sorted array `ref_sorted`."""
+    if len(ref_sorted) == 0:
+        return np.zeros(len(keys), dtype=bool)
+    pos = np.clip(np.searchsorted(ref_sorted, keys), 0, len(ref_sorted) - 1)
+    return ref_sorted[pos] == keys
+
+
+def _component_labels(keys_sorted, connectivity):
+    """Connected-component labels for a sorted array of packed cell keys.
+
+    Returns ``(n_components, labels)`` aligned with `keys_sorted`. Prefers the
+    optional `dijkstra3d_sparse` accelerator (labels straight off coordinates);
+    otherwise builds the sparse graph and uses scipy. Raises if neither is
+    available - the topology-safe fill genuinely needs a components routine.
+    """
+    try:  # accelerated path, straight off the coordinates
+        import dijkstra3d_sparse as _d3s
+
+        if hasattr(_d3s, "connected_components"):
+            return _d3s.connected_components(unpack(keys_sorted), connectivity=connectivity)
+    except Exception:  # pragma: no cover - fall back to scipy on any hiccup
+        pass
+    try:
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+    except ImportError as exc:
+        raise ImportError(
+            "fill_cavities(mode='exact') needs scipy or dijkstra3d_sparse; "
+            "install `sparse-cubes[skeleton]` or `pip install scipy`."
+        ) from exc
+    deltas = _POS_FACE_KEY_DELTA if connectivity == 6 else _POS26_KEY_DELTA
+    m = len(keys_sorted)
+    rows, cols = [], []
+    for delta in deltas:  # one direction per pair (graph is symmetrised below)
+        nb = keys_sorted + delta
+        pos = np.clip(np.searchsorted(keys_sorted, nb), 0, m - 1)
+        hit = keys_sorted[pos] == nb
+        rows.append(np.flatnonzero(hit))
+        cols.append(pos[hit])
+    r, c = np.concatenate(rows), np.concatenate(cols)
+    graph = coo_matrix((np.ones(len(r), bool), (r, c)), shape=(m, m))
+    return connected_components(graph, directed=False)
+
+
+def _fill_exact(vox, max_depth, max_cavity_size, verbose):
+    """Fill enclosed background voids (see `fill_cavities`, ``mode='exact'``)."""
+    # Shift so that a `max_depth`-step outward flood never drives a coordinate
+    # (or a +-1 neighbour of it) negative, and guard pack()'s 21-bit fields.
+    shift = vox.min(axis=0) - (max_depth + 1)
+    v = vox - shift
+    ext = int(v.max()) + max_depth + 1
+    if ext >= _PACK_FIELD:
+        raise ValueError(
+            f"Voxel extent (+ flood margin) reaches {ext}, exceeding pack()'s "
+            f"{_PACK_FIELD}-per-axis range. Downsample or lower max_depth."
+        )
+    obj = np.sort(pack(v))
+    vmin, vmax = v.min(axis=0), v.max(axis=0)
+
+    shell = np.unique(pack(boundary_shell(vox) - shift))
+    shell = shell[~_sorted_hit(shell, obj)]  # shells are background by construction
+
+    # Multi-source BFS over background, `max_depth` layers. Each new layer is a
+    # neighbour's shortest-path frontier, so a candidate can only collide with the
+    # previous two frontiers - dedup against those, never a growing visited set.
+    frontiers = [shell]
+    prev, cur = np.empty(0, np.int64), shell
+    reached = 0
+    for d in range(1, max_depth + 1):
+        cand = np.unique((cur[:, None] + _FACE_KEY_DELTA[None, :]).ravel())
+        cand = cand[~_sorted_hit(cand, obj)]  # object voxels are walls
+        cand = cand[~_sorted_hit(cand, cur)]
+        cand = cand[~_sorted_hit(cand, prev)]
+        if len(cand) == 0:
+            break
+        frontiers.append(cand)
+        prev, cur = cur, cand
+        reached = d
+
+    band = np.concatenate(frontiers)
+    depth = np.concatenate(
+        [np.full(len(f), i, dtype=np.int32) for i, f in enumerate(frontiers)]
+    )
+    order = np.argsort(band, kind="stable")
+    band, depth = band[order], depth[order]
+
+    n_comp, labels = _component_labels(band, 6)
+
+    # A component is EXTERIOR iff it reaches the cut-off frontier (depth ==
+    # max_depth: the flood was still expanding) or steps outside the object's own
+    # bbox (definitionally outside). Both are cheap OR-reductions per component.
+    # An enclosed void can do neither, so `~exterior` is exactly the voids -
+    # crucially there are no false positives, so we never over-fill (fuse/erase
+    # topology); the only miss is a void thicker than `max_depth` from its lining.
+    coords = unpack(band)
+    outside = ((coords < vmin) | (coords > vmax)).any(axis=1)
+    at_frontier = depth >= max_depth  # only true when the flood was cut off
+    flag = outside | at_frontier
+    exterior = np.zeros(n_comp, dtype=bool)
+    np.logical_or.at(exterior, labels, flag)
+    enclosed = ~exterior
+    if max_cavity_size is not None:
+        sizes = np.bincount(labels, minlength=n_comp)
+        enclosed &= sizes <= max_cavity_size
+
+    # Preserve connected components: a void whose lining spans two *distinct*
+    # object components is a pocket trapped *between* them, and filling it would
+    # weld them into one. Skip those - leave the pocket - so the fill never
+    # changes the object's b0 (never fuses separate branches).
+    if enclosed.any():
+        vsel = enclosed[labels]
+        vcells, vcomp = band[vsel], labels[vsel]
+        nb = (vcells[:, None] + _FACE_KEY_DELTA[None, :]).ravel()
+        owner = np.repeat(vcomp, len(_FACE_KEY_DELTA))
+        pos = np.clip(np.searchsorted(obj, nb), 0, len(obj) - 1)
+        hit = obj[pos] == nb  # face-neighbours that are object (the void's lining)
+        n_obj, obj_lab = _component_labels(obj, 26)
+        lin_comp, lin_lab = owner[hit], obj_lab[pos[hit]]
+        lo_lab = np.full(n_comp, n_obj, dtype=np.int64)
+        hi_lab = np.full(n_comp, -1, dtype=np.int64)
+        np.minimum.at(lo_lab, lin_comp, lin_lab)
+        np.maximum.at(hi_lab, lin_comp, lin_lab)
+        enclosed &= lo_lab == hi_lab  # single lining component (== also drops liningless)
+
+    void_keys = band[enclosed[labels]]
+    log(
+        f"fill_cavities: depth {reached}, band {len(band)} cells, "
+        f"{int(enclosed.sum())} void(s), {len(void_keys)} cells filled.",
+        verbose=verbose,
+    )
+    if len(void_keys) == 0:
+        return vox  # nothing enclosed - return the (int64) input unchanged
+    voids = unpack(np.sort(void_keys)) + shift
+    return np.vstack([vox, voids])
+
+
+def _fill_closing(vox, verbose):
+    """Fill 1-voxel voids by a radius-1 morphological closing (see `fill_cavities`)."""
+    shift = vox.min(axis=0) - 2  # room for the +-1 dilation
+    v = vox - shift
+    if int(v.max()) + 1 >= _PACK_FIELD:
+        raise ValueError("Voxel extent exceeds pack()'s range; downsample first.")
+    keys = pack(v)
+    dil = np.unique(
+        np.concatenate([keys] + [keys + d for d in _FACE_KEY_DELTA])
+    )
+    keep = np.ones(len(dil), dtype=bool)  # erode: keep cells with all 6 faces set
+    for d in _FACE_KEY_DELTA:
+        keep &= _sorted_hit(dil + d, dil)
+    out = unpack(dil[keep]) + shift
+    log(
+        f"fill_cavities(closing): {len(vox)} -> {len(out)} voxels.", verbose=verbose
+    )
+    return out
+
+
+def fill_cavities(voxels, *, mode="exact", max_depth=8, max_cavity_size=None, verbose=False):
+    """Fill enclosed background voids in a sparse ``(N, 3)`` voxel set.
+
+    Topological thinning (`sparsecubes.thin`) preserves enclosed cavities, so a
+    void inside the object leaves a thick, un-thinnable "blob" on the centerline.
+    Filling the voids first removes those blobs. Everything stays sparse - no
+    dense grid is allocated; work scales with the object surface (and flood depth),
+    not the bounding-box volume.
+
+    Parameters
+    ----------
+    voxels :        (N, 3) integer array of XYZ voxel coordinates.
+    mode :          {"exact", "closing"}, optional
+                    ``"exact"`` (default) fills *only* truly enclosed voids: it
+                    seeds a 6-connected background flood from `boundary_shell` and
+                    keeps the components walled off from the exterior. It preserves
+                    components and tunnels/loops and never fuses nearby branches,
+                    but needs scipy (or `dijkstra3d_sparse`) for the component
+                    labelling. ``"closing"`` is a fast, dependency-free radius-1
+                    morphological closing (dilate then erode); it fills only
+                    ~1-voxel voids and **can fuse distinct branches that pass
+                    within two voxels of each other** - use with care.
+    max_depth :     int, optional
+                    (Exact mode.) Flood depth in voxels; the largest void
+                    *thickness from its lining* that can be filled is ``max_depth``.
+                    Cost scales with `max_depth`. Voids thicker than this are left
+                    unfilled (never mis-filled), so raise it only if thick voids
+                    persist. Default 8.
+    max_cavity_size : int, optional
+                    (Exact mode.) If set, enclosed components larger than this many
+                    cells are left unfilled (a safety cap). Default ``None``.
+    verbose :       bool, optional. Log progress.
+
+    Returns
+    -------
+    (M, 3) array of the same integer dtype as `voxels` (``M >= N``), deduplicated.
+    """
+    if not isinstance(voxels, np.ndarray) or voxels.ndim != 2 or voxels.shape[1] != 3:
+        raise TypeError("Expected a (N, 3) numpy array of voxel coordinates.")
+    if voxels.dtype not in INT_DTYPES:
+        raise TypeError(f"Expected integer dtype, got {voxels.dtype}")
+    if len(voxels) == 0:
+        return voxels
+
+    out_dtype = voxels.dtype
+    vox = voxels.astype(np.int64)
+    if mode == "closing":
+        out = _fill_closing(vox, verbose)
+    elif mode == "exact":
+        out = _fill_exact(vox, int(max_depth), max_cavity_size, verbose)
+    else:
+        raise ValueError(f"mode must be 'exact' or 'closing', got {mode!r}")
+    return unique(out, axis=0).astype(out_dtype)
+
+
 def surface_voxel_mask(voxels):
     """Create mask for voxels.
 

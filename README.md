@@ -18,7 +18,7 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
   rectangles (greedy meshing), typically ~2x fewer triangles.
 - **Thinning** - peel voxels down to a 1-voxel-wide, topology-preserving medial
   curve.
-- **Centerline skeletons** - extract a node/edge graph (with radii); export to
+- **Centerline skeletons** - extract a node/edge graph (with radii) from thinned voxels; export to
   SWC / networkx / trimesh.
 - **TEASAR skeletons** - well-centered medial-axis skeletons with radii, a sparse
   reimplementation of [`kimimaro`](https://github.com/seung-lab/kimimaro).
@@ -79,8 +79,8 @@ Skeletonization:
 ```python
 >>> # `thin` peels the object to a 1-voxel medial curve (a subset of the input)
 >>> thinned = sc.thin(voxels)
->>> # `skeletonize` thins and extracts the centerline graph in one step
->>> skel = sc.skeletonize(voxels, min_branch_length=3, radii=True)
+>>> # `thin_skeletonize` thins and extracts the centerline graph in one step
+>>> skel = sc.thin_skeletonize(voxels, min_branch_length=3, radii=True)
 >>> # ...or trace a well-centered TEASAR medial-axis skeleton
 >>> skel = sc.teasar_skeletonize(voxels, spacing=(1, 1, 1), min_branch_length=3)
 >>> skel.nodes            # (M, 3) voxel coordinates
@@ -150,8 +150,8 @@ occupancy) that would be wasteful to densify for `scikit-image`'s thinning or
 >>> import sparsecubes as sc
 >>> # `thin` peels the object to a 1-voxel medial curve (a subset of the input)
 >>> thinned = sc.thin(voxels)
->>> # `skeletonize` thins and extracts the centerline graph in one step
->>> skel = sc.skeletonize(voxels, min_branch_length=3, radii=True)
+>>> # `thin_skeletonize` thins and extracts the centerline graph in one step
+>>> skel = sc.thin_skeletonize(voxels, min_branch_length=3, radii=True)
 >>> skel.nodes            # (M, 3) voxel coordinates
 >>> skel.edges            # (K, 2) undirected node-index pairs
 >>> skel.radii            # (M,) distance-to-boundary per node (needs scipy)

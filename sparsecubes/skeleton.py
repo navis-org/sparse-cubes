@@ -16,7 +16,7 @@ import numpy as np
 from .core import pack, log, unique, boundary_shell
 from .thinning import thin, _OFF26, _check_extent, _validate
 
-__all__ = ["Skeleton", "centerline", "skeletonize"]
+__all__ = ["Skeleton", "centerline", "thin_skeletonize"]
 
 
 def _as_spacing(spacing):
@@ -357,7 +357,7 @@ def centerline(
     if radii:
         if object_voxels is None:
             raise ValueError(
-                "radii=True needs the original object; call skeletonize(...) or "
+                "radii=True needs the original object; call thin_skeletonize(...) or "
                 "pass object_voxels=<original (N, 3) voxels>."
             )
         r = _radii(nodes, np.asarray(object_voxels).astype(np.int64), spacing)
@@ -365,22 +365,30 @@ def centerline(
     return Skeleton(nodes.astype(dtype), edges, r, spacing)
 
 
-def skeletonize(
+def thin_skeletonize(
     voxels,
     *,
     spacing=None,
     preserve_endpoints=True,
     min_branch_length=0,
+    fill_cavities=False,
     radii=False,
     verbose=False,
 ):
     """Thin `voxels` and extract a centerline `Skeleton` in one call.
 
     Convenience wrapper: ``centerline(thin(voxels), object_voxels=voxels, ...)``.
-    See `thin` and `centerline` for the parameters.
+    See `thin` and `centerline` for the parameters. `fill_cavities` (default
+    False) fills enclosed voids before thinning to avoid centerline blobs; see
+    `thin`. Note radii are still measured against the original `voxels`.
     """
     _validate(voxels)
-    thinned = thin(voxels, preserve_endpoints=preserve_endpoints, verbose=verbose)
+    thinned = thin(
+        voxels,
+        preserve_endpoints=preserve_endpoints,
+        fill_cavities=fill_cavities,
+        verbose=verbose,
+    )
     return centerline(
         thinned,
         spacing=spacing,

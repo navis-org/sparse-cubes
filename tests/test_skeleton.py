@@ -11,8 +11,8 @@ HAS_SCIPY = importlib.util.find_spec("scipy") is not None
 HAS_NETWORKX = importlib.util.find_spec("networkx") is not None
 
 
-def test_skeletonize_returns_skeleton():
-    skel = sc.skeletonize(line(10))
+def test_thin_skeletonize_returns_skeleton():
+    skel = sc.thin_skeletonize(line(10))
     assert isinstance(skel, Skeleton)
     assert skel.nodes.shape[1] == 3
     assert skel.edges.shape[1] == 2
@@ -21,16 +21,16 @@ def test_skeletonize_returns_skeleton():
     assert skel.edges.max() < len(skel.nodes)
 
 
-def test_skeletonize_matches_centerline_of_thin():
+def test_thin_skeletonize_matches_centerline_of_thin():
     v = solid_cylinder(4, 14)
-    a = sc.skeletonize(v)
+    a = sc.thin_skeletonize(v)
     b = sc.centerline(sc.thin(v))
     assert np.array_equal(a.nodes, b.nodes)
     assert np.array_equal(a.edges, b.edges)
 
 
 def test_line_has_two_ends_no_branch():
-    skel = sc.skeletonize(line(10))
+    skel = sc.thin_skeletonize(line(10))
     deg = skel.node_degrees()
     assert (deg == 1).sum() == 2          # exactly two endpoints
     assert (deg >= 3).sum() == 0          # no branch points
@@ -47,7 +47,7 @@ def test_y_branch_has_one_branch_three_ends():
 
 
 def test_edges_are_26_connected():
-    skel = sc.skeletonize(solid_cylinder(4, 14))
+    skel = sc.thin_skeletonize(solid_cylinder(4, 14))
     coords = skel.nodes.astype(np.int64)
     for a, b in skel.edges:
         d = np.abs(coords[a] - coords[b])
@@ -55,7 +55,7 @@ def test_edges_are_26_connected():
 
 
 def test_annulus_skeleton_keeps_loop():
-    skel = sc.skeletonize(annulus(9, 5))
+    skel = sc.thin_skeletonize(annulus(9, 5))
     _, b1 = betti(skel.nodes, skel.edges)
     assert b1 >= 1
 
@@ -79,7 +79,7 @@ def test_prune_spurs_removes_short_hair():
 
 
 def test_to_swc_is_a_valid_forest():
-    skel = sc.skeletonize(y_branch(7))
+    skel = sc.thin_skeletonize(y_branch(7))
     swc = skel.to_swc()
     assert swc.shape == (len(skel.nodes), 7)
 
@@ -94,7 +94,7 @@ def test_to_swc_is_a_valid_forest():
 
 
 def test_to_swc_writes_file(tmp_path):
-    skel = sc.skeletonize(line(8))
+    skel = sc.thin_skeletonize(line(8))
     out = tmp_path / "skel.swc"
     skel.to_swc(filepath=str(out))
     assert out.exists()
@@ -104,7 +104,7 @@ def test_to_swc_writes_file(tmp_path):
 
 def test_to_path3d():
     trimesh = pytest.importorskip("trimesh")
-    skel = sc.skeletonize(line(8))
+    skel = sc.thin_skeletonize(line(8))
     path = skel.to_path3d()
     assert path.vertices.shape[0] == len(skel.nodes)
     assert len(path.entities) == len(skel.edges)
@@ -112,8 +112,8 @@ def test_to_path3d():
 
 def test_spacing_scales_vertices_not_topology():
     spacing = np.array([2.0, 3.0, 4.0])
-    plain = sc.skeletonize(solid_cylinder(4, 14))
-    scaled = sc.skeletonize(solid_cylinder(4, 14), spacing=spacing)
+    plain = sc.thin_skeletonize(solid_cylinder(4, 14))
+    scaled = sc.thin_skeletonize(solid_cylinder(4, 14), spacing=spacing)
     # Same graph, vertices scaled.
     assert np.array_equal(plain.nodes, scaled.nodes)
     assert np.array_equal(plain.edges, scaled.edges)
@@ -123,7 +123,7 @@ def test_spacing_scales_vertices_not_topology():
 @pytest.mark.skipif(not HAS_SCIPY, reason="scipy not installed")
 def test_radii_are_positive_and_sized():
     v = solid_cylinder(4, 16)
-    skel = sc.skeletonize(v, radii=True)
+    skel = sc.thin_skeletonize(v, radii=True)
     assert skel.radii is not None
     assert skel.radii.shape == (len(skel.nodes),)
     # Distance to background is always positive (nodes are inside the object).
@@ -139,7 +139,7 @@ def test_radii_without_object_raises():
 
 @pytest.mark.skipif(not HAS_NETWORKX, reason="networkx not installed")
 def test_to_networkx():
-    skel = sc.skeletonize(y_branch(7))
+    skel = sc.thin_skeletonize(y_branch(7))
     g = skel.to_networkx()
     assert g.number_of_nodes() == len(skel.nodes)
     assert g.number_of_edges() == len(skel.edges)

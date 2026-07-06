@@ -490,8 +490,20 @@ def _skeletonize_component(vox, src, dst, w_geom, spacing, params, use_sparse):
     # --- distance-from-root (geodesic) and penalty field ------------------
     daf = backend.geom_dist(root)
 
-    dmax = dbf.max() ** 1.01
-    pdrf_node = params["pdrf_scale"] * (1.0 - dbf / dmax) ** params["pdrf_exponent"]
+    ref = params["pdrf_ref"]
+    if ref is None:
+        # Normalise by the global-max thickness (the soma in a neuron).
+        t = dbf / (dbf.max() ** 1.01)
+    else:
+        # Saturate DBF at a reference thickness (a high DBF quantile) so the whole
+        # thick backbone - not just the single thickest voxel - reads as ~zero
+        # penalty. This keeps long thick routes cheaper than short thin ones, so
+        # paths stop short-cutting through fine-neurite self-touches.
+        finite = np.isfinite(dbf) & (dbf > 0)
+        thr = np.quantile(dbf[finite], ref) if finite.any() else 0.0
+        thr = thr if thr > 0 else dbf.max()
+        t = np.minimum(dbf, thr) / thr
+    pdrf_node = params["pdrf_scale"] * (1.0 - t) ** params["pdrf_exponent"]
     if params["dbf_term"]:
         finite = np.isfinite(daf)
         dafmax = daf[finite].max() or 1.0
@@ -570,6 +582,7 @@ def teasar_skeletonize(
     const=None,
     pdrf_scale=100_000.0,
     pdrf_exponent=4.0,
+    pdrf_ref=None,
     dbf_term=False,
     branching="exact",
     root="geodesic",
@@ -612,8 +625,21 @@ def teasar_skeletonize(
                         `spacing` is set). Note kimimaro's default ``const=300``
                         assumes nanometre EM data - do not reuse it in index space.
     pdrf_scale,
-    pdrf_exponent :     penalty field ``pdrf_scale * (1 - DBF/max(DBF)**1.01) **
-                        pdrf_exponent`` that pulls paths onto the centerline.
+    pdrf_exponent :     penalty field ``pdrf_scale * (1 - DBF/ref) ** pdrf_exponent``
+                        that pulls paths onto the centerline. The reference
+                        thickness ``ref`` defaults to ``max(DBF)**1.01`` (see
+                        `pdrf_ref`).
+    pdrf_ref :          float in ``(0, 1]`` or None (default). Quantile of the
+                        per-component distance-from-boundary field used as the
+                        penalty-field reference thickness: DBF is saturated at
+                        that thickness so every voxel at or above it (the thick
+                        backbone *and* the soma) gets ~zero penalty, making long
+                        thick routes cheap relative to short thin ones. Use this
+                        to stop paths short-cutting through fine-neurite
+                        self-touches and breaking the backbone (start ~0.8; lower
+                        counts more of the object as backbone). ``None`` normalises
+                        by the global-max thickness (the soma), reproducing the
+                        prior behaviour exactly.
     dbf_term :          add the normalised distance-from-root to the penalty field
                         (kimimaro found this perturbs paths off-centre; default off).
     branching :         extraction strategy, ordered by the speed/fidelity
@@ -687,6 +713,11 @@ def teasar_skeletonize(
     if const is None:
         const = 4.0 if spacing is None else 4.0 * float(np.min(spacing))
 
+    if pdrf_ref is not None and not (0.0 < float(pdrf_ref) <= 1.0):
+        raise ValueError(
+            f"pdrf_ref must be a quantile in (0, 1] or None; got {pdrf_ref!r}."
+        )
+
     # `branching` -> (fix_branching, batch_size). batch_size None = exact per-path.
     if isinstance(branching, str):
         try:
@@ -712,6 +743,7 @@ def teasar_skeletonize(
         "const": float(const),
         "pdrf_scale": float(pdrf_scale),
         "pdrf_exponent": float(pdrf_exponent),
+        "pdrf_ref": None if pdrf_ref is None else float(pdrf_ref),
         "dbf_term": bool(dbf_term),
         "fix_branching": fix_branching,
         "batch_size": batch_size,

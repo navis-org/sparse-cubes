@@ -68,6 +68,88 @@ def annulus(outer=9, inner=5):
     return np.column_stack([pts, np.zeros(len(pts), dtype=int)]).astype(np.int64)
 
 
+def hollow_box(outer=7, void=3):
+    """A solid `outer` cube with a centered `void` cube of empty interior cells.
+
+    The empty core is fully surrounded by object voxels (an enclosed cavity, a
+    non-zero b2 generator), so topological thinning cannot collapse the shell.
+    Returns the shell voxels; `full_box`/`void_cells` give the pieces.
+    """
+    cube = solid_cube(outer)
+    lo = (outer - void) // 2
+    hi = lo + void
+    inside = np.all((cube >= lo) & (cube < hi), axis=1)
+    return cube[~inside]
+
+
+def box_with_tunnel(k=5):
+    """A solid `k` cube with a straight column removed along z (open both ends).
+
+    A through-tunnel (a b1 loop), *not* an enclosed void: the empty column
+    reaches the exterior at both faces, so `fill_cavities` must leave it be.
+    """
+    cube = solid_cube(k)
+    c = k // 2
+    column = (cube[:, 0] == c) & (cube[:, 1] == c)
+    return cube[~column]
+
+
+# Geometry of the self-touch hairpin fixture, shared with the tests that probe
+# its arms (so the detector references the same numbers the builder used).
+HAIRPIN = dict(soma_r=10, arm_r=3, x0=30, x1=150, y_left=30, y_right=50, cz=30)
+
+
+def _ball(center, r):
+    rr = int(np.ceil(r))
+    g = np.mgrid[-rr : rr + 1, -rr : rr + 1, -rr : rr + 1].reshape(3, -1).T
+    return g[(g ** 2).sum(1) <= r * r] + np.asarray(center)
+
+
+def _cylinder_x(x0, x1, cy, cz, r):
+    """A solid cylinder of radius `r` running along +x from x0 to x1 (inclusive)."""
+    rr = int(np.ceil(r))
+    dy, dz = np.mgrid[-rr : rr + 1, -rr : rr + 1].reshape(2, -1)
+    keep = dy * dy + dz * dz <= r * r
+    dy, dz = dy[keep], dz[keep]
+    return np.vstack(
+        [np.column_stack([np.full(dy.size, x), cy + dy, cz + dz]) for x in range(x0, x1 + 1)]
+    )
+
+
+def _wire(waypoints):
+    """A dense 1-voxel-wide 26-connected polyline through integer waypoints."""
+    pts = [np.asarray(p, float) for p in waypoints]
+    out = []
+    for a, b in zip(pts[:-1], pts[1:]):
+        n = int(np.abs(b - a).max()) + 1
+        out.append(np.round(a + (b - a) * np.linspace(0, 1, n)[:, None]).astype(int))
+    return np.vstack(out)
+
+
+def self_touch_hairpin():
+    """A thick bar folded back on itself, self-touching through a thin bridge.
+
+    Two thick parallel arms share a thick base (a soma-like blob - the globally
+    thickest region) and are joined at their far ends by a short *thin* wire: the
+    kind of fine self-touch a neuron makes when a neurite curls back and contacts
+    itself. The shape has one loop, so a skeletonizer must break it either at the
+    thin bridge (correct - both thick arms stay intact) or by severing a thick arm
+    (the backbone break this fixture exposes). The soma makes the arms thin
+    *relative to the global-max* thickness, which is exactly what lets the default
+    penalty field prefer the thin-bridge short-cut and cut an arm; `pdrf_ref`
+    saturates that away. Geometry is fixed in `HAIRPIN`.
+    """
+    g = HAIRPIN
+    cy = (g["y_left"] + g["y_right"]) // 2
+    parts = [
+        _ball((g["x0"], cy, g["cz"]), g["soma_r"]),
+        _cylinder_x(g["x0"], g["x1"], g["y_left"], g["cz"], g["arm_r"]),
+        _cylinder_x(g["x0"], g["x1"], g["y_right"], g["cz"], g["arm_r"]),
+        _wire([(g["x1"], g["y_left"], g["cz"]), (g["x1"], g["y_right"], g["cz"])]),
+    ]
+    return np.unique(np.vstack(parts).astype(np.int64), axis=0)
+
+
 # --- topology helpers ------------------------------------------------------
 
 def _union_find(m, edges):

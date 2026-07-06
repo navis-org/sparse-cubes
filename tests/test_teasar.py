@@ -26,6 +26,8 @@ from _shapes import (
     slab,
     solid_cylinder,
     annulus,
+    self_touch_hairpin,
+    HAIRPIN,
     betti,
     n_components,
     is_subset,
@@ -231,6 +233,75 @@ def test_dbf_term_runs():
     sk = sc.teasar_skeletonize(solid_cylinder(4, 20), dbf_term=True)
     ncomp, fb = betti(sk.nodes, sk.edges)
     assert ncomp == 1 and fb == 0
+
+
+# --- pdrf_ref: backbone-preferential penalty field -------------------------
+
+def _arm_reaches_base(sk, y):
+    """Smallest x a skeleton node reaches inside the hairpin arm at row `y`.
+
+    Restricted to the arm tube past the soma; a severed arm's centerline stops
+    short of the base, so its minimum x stays large.
+    """
+    g = HAIRPIN
+    n = sk.nodes
+    tube = (
+        (np.abs(n[:, 1] - y) <= g["arm_r"])
+        & (np.abs(n[:, 2] - g["cz"]) <= g["arm_r"])
+        & (n[:, 0] >= g["x0"] + g["arm_r"] + 2)
+        & (n[:, 0] <= g["x1"])
+    )
+    xs = n[tube, 0]
+    return int(xs.min()) if xs.size else 10 ** 9
+
+
+def test_pdrf_ref_keeps_thick_backbone_intact():
+    # A thick bar folded back and self-touching through a thin bridge. The default
+    # penalty field normalises DBF by the *global-max* thickness (the soma), so the
+    # thick arms look costly and the loop is short-cut through the thin bridge -
+    # severing an arm near the base (the "backbone break"). `pdrf_ref` saturates the
+    # DBF at a high quantile so the whole thick bar reads as ~zero penalty; the loop
+    # is then cut at the thin bridge and both arms stay intact to the base.
+    v = self_touch_hairpin()
+    g = HAIRPIN
+    base = g["x0"] + g["arm_r"] + 8   # reaching an x this small == back at the base
+
+    default = sc.teasar_skeletonize(v, branching="tree", scale=3)
+    fixed = sc.teasar_skeletonize(v, branching="tree", scale=3, pdrf_ref=0.8)
+
+    # both remain valid skeletons: acyclic, single component, subset of the input
+    for sk in (default, fixed):
+        ncomp, first_betti = betti(sk.nodes, sk.edges)
+        assert first_betti == 0 and ncomp == 1
+        assert is_subset(sk.nodes, v)
+
+    # default severs an arm: at least one arm centerline never reaches the base
+    assert max(_arm_reaches_base(default, g["y_left"]),
+               _arm_reaches_base(default, g["y_right"])) > base
+    # pdrf_ref keeps *both* thick arms intact all the way to the base
+    assert _arm_reaches_base(fixed, g["y_left"]) <= base
+    assert _arm_reaches_base(fixed, g["y_right"]) <= base
+
+
+@pytest.mark.parametrize("name", ["line", "y_branch", "cylinder"])
+def test_pdrf_ref_preserves_simple_topology(name):
+    # The opt-in penalty reshaping must not disturb ordinary shapes.
+    shp = SHAPES[name]
+    sk = sc.teasar_skeletonize(shp, pdrf_ref=0.9)
+    ncomp, first_betti = betti(sk.nodes, sk.edges)
+    assert first_betti == 0 and ncomp == n_components(shp)
+    assert is_subset(sk.nodes, shp)
+    deg = sk.node_degrees()
+    if name == "line":
+        assert int((deg == 1).sum()) == 2 and int((deg >= 3).sum()) == 0
+    elif name == "y_branch":
+        assert int((deg >= 3).sum()) == 1 and int((deg == 1).sum()) == 3
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, 1.5, 2])
+def test_pdrf_ref_invalid_raises(bad):
+    with pytest.raises(ValueError):
+        sc.teasar_skeletonize(line(10), pdrf_ref=bad)
 
 
 # --- branching='fast' / batched multi-source mode --------------------------

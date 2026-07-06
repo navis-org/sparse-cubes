@@ -12,6 +12,7 @@ from sparsecubes.thinning import (
     _OFF6,
     _is_simple_config,
     _neighbor_mask,
+    _neighbor_mask_full,
     _build_key_set,
 )
 from _shapes import (
@@ -52,6 +53,20 @@ def test_bit_of_off6_matches_neighbor_mask():
         bit = int(_BIT_OF_OFF6[d])
         assert (mask[0] >> bit) & 1 == 1
         assert mask[0] == np.uint32(1) << np.uint32(bit)
+
+
+def test_neighbor_mask_full_matches_per_voxel():
+    # The merge-based full-set mask build must agree with the per-voxel
+    # searchsorted reference on a random voxel cloud (sorted by packed key,
+    # exactly how `thin` calls it).
+    rng = np.random.default_rng(1)
+    vox = np.unique(rng.integers(0, 30, size=(2000, 3), dtype=np.int64), axis=0)
+    keys, shift = _build_key_set(vox)
+    from sparsecubes.core import unpack
+
+    vox_sorted = unpack(keys) + shift
+    ref = _neighbor_mask(vox_sorted, keys, shift)
+    assert np.array_equal(_neighbor_mask_full(keys), ref)
 
 
 def test_simple_point_examples():
