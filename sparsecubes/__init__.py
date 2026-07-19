@@ -8,6 +8,7 @@ from .core import (
     dual_contour,  # deprecated alias
     marching_cubes,  # deprecated alias
 )
+from .voxelization import voxelize
 from .thinning import thin
 from .skeleton import thin_skeletonize, centerline, Skeleton
 from .teasar import teasar_skeletonize
@@ -22,6 +23,7 @@ __all__ = [
     "fill_cavities",
     "dual_contour",
     "marching_cubes",
+    "voxelize",
     "thin",
     "thin_skeletonize",
     "centerline",

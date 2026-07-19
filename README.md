@@ -1,6 +1,6 @@
 # sparse-cubes
 
-Fast, memory-efficient meshing and skeletonization for sparse voxel data:
+Fast, memory-efficient operations on sparse voxel data:
 `(N, 3)` arrays of voxel indices - i.e. the 3D equivalent of a sparse matrix in
 COOrdinate (COO) format.
 
@@ -14,6 +14,8 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
 
 - **Meshing** - turn surface voxels into a mesh, either **smooth** (SurfaceNets)
   or **blocky** (culled cube faces à la Minecraft).
+- **Voxelization** - the inverse: turn a triangle mesh into sparse voxels,
+  **solid** (filled interior) or surface-only.
 - **Lossless simplification** - merge coplanar blocky faces into maximal
   rectangles (greedy meshing), typically ~2x fewer triangles.
 - **Thinning** - peel voxels down to a 1-voxel-wide, topology-preserving medial
@@ -72,6 +74,22 @@ True
 >>> m_blocky = sc.mesh(voxel_xyz, smooth=False)
 >>> # ...and simplify=True (or sc.greedy_faces) to merge coplanar faces losslessly
 >>> m_small = sc.mesh(voxel_xyz, smooth=False, simplify=True)
+```
+
+Voxelization (the inverse of `sc.mesh`):
+
+```python
+>>> import trimesh as tm
+>>> m = tm.creation.icosphere(subdivisions=3, radius=10)
+>>> # Solid by default: surface + filled interior
+>>> vox = sc.voxelize(m, spacing=1.0)
+>>> vox.shape
+(4169, 3)
+>>> # ...or just the surface shell
+>>> shell = sc.voxelize(m, spacing=1.0, solid=False)
+>>> # Anisotropic voxels are fine, and the result feeds straight back in
+>>> vox = sc.voxelize(m, spacing=(1.0, 1.0, 2.0))
+>>> skel = sc.thin_skeletonize(sc.voxelize(m, 1.0))
 ```
 
 Skeletonization:
@@ -134,6 +152,46 @@ See also notes at the end of the README.
 of `sc.mesh` (their old `interpolate` argument maps to `smooth`) but emit a
 `DeprecationWarning` - neither name ever described what this library actually
 does.
+
+## Voxelization
+
+`sc.voxelize` is the inverse of `sc.mesh`: it rasterizes a `trimesh.Trimesh` (or a
+`(vertices, faces)` pair) into the same `(N, 3)` integer representation, in two
+stages that both stay sparse.
+
+The **surface** stage is an exact conservative rasterization - a voxel is emitted
+iff the triangle genuinely intersects its cube, decided by a separating-axis test
+rather than by point sampling. The **interior** stage is a scanline parity fill:
+each triangle is rasterized in the XY projection over voxel column centres, the
+resulting Z crossings are sorted per column and paired up, and the cells between
+a pair are emitted as runs. Memory is proportional to the crossings plus the
+output, and the even-odd rule means face winding is irrelevant (meshes with
+inconsistent normals still work) and enclosed cavities are correctly left empty.
+
+```python
+>>> vox = sc.voxelize(mesh, spacing=1.0)               # solid
+>>> vox = sc.voxelize(mesh, spacing=1.0, solid=False)  # surface shell only
+>>> vox = sc.voxelize(mesh, spacing=(0.5, 0.5, 1.0))   # anisotropic
+```
+
+Voxel `i` along an axis covers `[(i - 0.5) * spacing, (i + 0.5) * spacing)`, so
+its *centre* is at `i * spacing`. This matches trimesh's `VoxelGrid` convention
+and makes the round trip line up: `sc.mesh(sc.voxelize(m, s), spacing=s)` lands
+back on top of the original mesh. Indices are absolute and may be negative.
+
+**Why not just use trimesh?** `mesh.voxelized(pitch)` already returns sparse
+*surface* voxels without densifying, though it approximates - it subdivides faces
+and keeps the cells containing the resulting vertices, so it misses cells a
+triangle only clips through a corner. The gap is solid voxelization: every fill
+path in trimesh materializes the full bounding box (`fill('holes')` runs
+`scipy.ndimage.binary_fill_holes` on a dense array, and `fill('base')` allocates a
+cube of the largest coordinate), which is exactly what this library exists to
+avoid. `sc.voxelize` fills sparsely, so peak memory tracks the object rather than
+its bounding box.
+
+If a mesh is not watertight some columns cannot be paired up. Those are left
+unfilled and a warning names how many; either repair the mesh first
+(`trimesh`'s `fill_holes`) or pass `solid=False`.
 
 ## Thinning, centerline & TEASAR skeletons
 
