@@ -128,7 +128,7 @@ def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
     See Also
     --------
     sparsecubes.mesh :          The inverse operation.
-    sparsecubes.fill_cavities : Fill enclosed voids in an existing voxel set.
+    sparsecubes.binary.fill_cavities : Fill enclosed voids in an existing voxel set.
     """
     vertices, faces = _as_mesh(mesh)
 

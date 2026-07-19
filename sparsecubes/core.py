@@ -10,6 +10,8 @@ except ImportError:
 
 INT_DTYPES = (np.int64, np.int32, np.int16, np.uint64, np.uint32, np.uint16)
 
+from ._sparse import sparse_aware
+
 
 # The original Trimesh automatically casts vertices to float64. Realistically,
 # our meshes should be fine with uint32 most of the time so we will avoid the
@@ -30,6 +32,7 @@ class Trimesh(tm.Trimesh):
         self._data["vertices"] = np.asanyarray(values, order="C")
 
 
+@sparse_aware
 def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify=False):
     """Generate a surface mesh from sparse `(N, 3)` voxel indices.
 
@@ -170,6 +173,7 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify
     return m
 
 
+@sparse_aware
 def surface_nets(voxels, spacing=None, step_size=1, verbose=False):
     """Smooth (naive SurfaceNets) surface mesh from sparse voxels.
 
@@ -180,6 +184,7 @@ def surface_nets(voxels, spacing=None, step_size=1, verbose=False):
     )
 
 
+@sparse_aware
 def culled_faces(voxels, spacing=None, step_size=1, verbose=False, simplify=False):
     """Blocky (culled cube faces) surface mesh from sparse voxels.
 
@@ -196,6 +201,7 @@ def culled_faces(voxels, spacing=None, step_size=1, verbose=False, simplify=Fals
     )
 
 
+@sparse_aware
 def greedy_faces(voxels, spacing=None, step_size=1, verbose=False):
     """Simplified blocky mesh with coplanar faces merged (greedy meshing).
 
@@ -213,6 +219,7 @@ def greedy_faces(voxels, spacing=None, step_size=1, verbose=False):
     )
 
 
+@sparse_aware
 def dual_contour(voxels, spacing=None, step_size=1, verbose=False, interpolate=True):
     """Deprecated, misnamed alias for `mesh` (this is not dual contouring).
 
@@ -236,6 +243,7 @@ def dual_contour(voxels, spacing=None, step_size=1, verbose=False, interpolate=T
     )
 
 
+@sparse_aware
 def marching_cubes(voxels, spacing=None, step_size=1, verbose=False, interpolate=True):
     """Deprecated, misnamed alias for `mesh` (this is not marching cubes).
 
@@ -551,10 +559,11 @@ def _fill_closing(vox, verbose):
     return out
 
 
+@sparse_aware(mirror=True)
 def fill_cavities(voxels, *, mode="exact", max_depth=8, max_cavity_size=None, verbose=False):
     """Fill enclosed background voids in a sparse ``(N, 3)`` voxel set.
 
-    Topological thinning (`sparsecubes.thin`) preserves enclosed cavities, so a
+    Topological thinning (`sparsecubes.binary.thin`) preserves enclosed cavities, so a
     void inside the object leaves a thick, un-thinnable "blob" on the centerline.
     Filling the voids first removes those blobs. Everything stays sparse - no
     dense grid is allocated; work scales with the object surface (and flood depth),

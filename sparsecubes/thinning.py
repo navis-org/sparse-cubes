@@ -29,6 +29,8 @@ import numpy as np
 
 from .core import pack, unpack, log, INT_DTYPES, fill_cavities as _fill_cavities
 
+from ._sparse import sparse_aware
+
 __all__ = ["thin"]
 
 
@@ -354,6 +356,7 @@ def _is_simple(masks):
     return _simple_batch(masks)
 
 
+@sparse_aware(mirror=True)
 def thin(
     voxels,
     *,
@@ -391,7 +394,7 @@ def thin(
                         before thinning. If False, the input is assumed unique.
     fill_cavities :     bool, optional
                         If True, fill enclosed background voids before thinning
-                        (`sparsecubes.fill_cavities`, exact mode). Thinning
+                        (`sparsecubes.binary.fill_cavities`, exact mode). Thinning
                         preserves such voids, so they otherwise leave thick,
                         un-thinnable "blobs" on the centerline. Recommended for
                         real segmentation data; adds roughly one thinning pass of

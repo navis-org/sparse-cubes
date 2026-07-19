@@ -110,16 +110,16 @@ def test_max_depth_gates_thick_voids():
 @exact_only
 def test_thin_flag_matches_manual_fill():
     shell = hollow_box(7, 3)
-    a = sc.thin(shell, fill_cavities=True)
-    b = sc.thin(fill_cavities(shell))
+    a = sc.binary.thin(shell, fill_cavities=True)
+    b = sc.binary.thin(fill_cavities(shell))
     assert np.array_equal(np.unique(a, axis=0), np.unique(b, axis=0))
 
 
 @exact_only
 def test_thin_fill_removes_blob():
     shell = hollow_box(7, 3)
-    plain = sc.thin(shell)
-    filled = sc.thin(shell, fill_cavities=True)
+    plain = sc.binary.thin(shell)
+    filled = sc.binary.thin(shell, fill_cavities=True)
     # The enclosed void (b2) can't collapse: thinning the shell leaves a whole
     # residual surface. Filling first lets it thin to a compact medial curve -
     # far fewer voxels - while staying a clean one-voxel-wide subset of the solid.
@@ -132,7 +132,7 @@ def test_thin_fill_removes_blob():
 def test_thin_skeletonize_fill_flag_runs():
     sk = sc.thin_skeletonize(hollow_box(7, 3), fill_cavities=True)
     assert len(sk.nodes) > 0
-    assert n_components(sc.thin(hollow_box(7, 3), fill_cavities=True)) == 1
+    assert n_components(sc.binary.thin(hollow_box(7, 3), fill_cavities=True)) == 1
 
 
 # --- closing mode ---------------------------------------------------------
@@ -173,7 +173,7 @@ def test_real_cloud_fill_is_topology_safe():
     assert is_subset(voxels, filled)
     assert n_components(filled) == n_components(voxels)
     # Thinning the filled cloud stays a valid one-voxel-wide subset.
-    thinned = sc.thin(voxels, fill_cavities=True)
+    thinned = sc.binary.thin(voxels, fill_cavities=True)
     assert not has_2x2x2_block(thinned)
     assert is_subset(thinned, filled)
 

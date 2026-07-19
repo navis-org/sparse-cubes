@@ -33,6 +33,7 @@ import numpy as np
 from .core import pack, log, unique, boundary_shell
 from .thinning import _OFF26, _validate, _check_extent
 from .skeleton import Skeleton, _prune_spurs, _as_spacing, _validate_edges
+from ._sparse import sparse_aware
 
 # Optional accelerator: multi-source Dijkstra straight over the sparse voxel
 # coordinates (no CSR graph materialised). When present it replaces scipy's
@@ -128,7 +129,7 @@ def _neighbors_26(vox):
     return vox, src, dst, off_idx
 
 
-def _dbf(nodes, object_voxels, spacing):
+def _dbf(nodes, object_voxels, spacing, workers=-1):
     """Distance-from-boundary field: nearest-background distance per voxel.
 
     Sparse Euclidean distance transform - `core.boundary_shell` gives the empty
@@ -136,6 +137,10 @@ def _dbf(nodes, object_voxels, spacing):
     nearest one (anisotropy applied by scaling coordinates). A surface voxel sits
     ~1 (physical unit) from its shell, never 0, so even one-voxel-thick neurites
     get a positive radius.
+
+    `workers` is handed to the KD-tree query, which dominates this call: the
+    default -1 uses every core and is several times faster on large clouds. It
+    only affects speed, never the result.
     """
     from scipy.spatial import cKDTree
 
@@ -144,7 +149,11 @@ def _dbf(nodes, object_voxels, spacing):
     if spacing is not None:
         shell = shell * spacing
         pts = pts * spacing
-    dist, _ = cKDTree(shell).query(pts, k=1)
+    tree = cKDTree(shell)
+    try:  # `workers` needs scipy >= 1.6
+        dist, _ = tree.query(pts, k=1, workers=workers)
+    except TypeError:  # pragma: no cover - older scipy
+        dist, _ = tree.query(pts, k=1)
     return np.asarray(dist, dtype=float)
 
 
@@ -464,7 +473,7 @@ def _skeletonize_component(vox, src, dst, w_geom, spacing, params, use_sparse):
     from scipy.spatial import cKDTree
 
     m = len(vox)
-    dbf = _dbf(vox, vox, spacing)
+    dbf = _dbf(vox, vox, spacing, params["workers"])
 
     # Degenerate component (single voxel, or no interior contrast): one node.
     if m == 1 or dbf.max() <= 0:
@@ -572,6 +581,7 @@ def _directed_from_edges(vox, edges, spacing):
     return src, dst, w_geom
 
 
+@sparse_aware
 def teasar_skeletonize(
     voxels,
     *,
@@ -588,6 +598,7 @@ def teasar_skeletonize(
     root="geodesic",
     min_branch_length=0,
     check_unique=True,
+    workers=-1,
     verbose=False,
 ):
     """Skeletonize a sparse voxel set with the TEASAR (kimimaro) algorithm.
@@ -663,6 +674,15 @@ def teasar_skeletonize(
     check_unique :      bool. If True (default) deduplicate `voxels` before
                         skeletonizing; if False, `voxels` is used as supplied (must
                         already be unique).
+    workers :           int, optional
+                        Threads for the distance-from-boundary KD-tree query, which
+                        is a large share of the runtime on big clouds. ``-1``
+                        (default) uses every core; ``1`` disables threading. Purely
+                        a speed knob - the skeleton is identical either way. Set it
+                        to ``1`` when skeletonizing many objects in parallel
+                        yourself (e.g. inside a `multiprocessing` pool), where the
+                        default would oversubscribe the CPUs. Needs scipy >= 1.6;
+                        silently ignored on older versions.
     verbose :           bool.
 
     Returns
@@ -748,6 +768,7 @@ def teasar_skeletonize(
         "fix_branching": fix_branching,
         "batch_size": batch_size,
         "root": root,
+        "workers": int(workers),
     }
 
     if len(vox) >= 2 ** 31:  # int32 node indices in the edge list

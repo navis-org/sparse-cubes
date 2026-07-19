@@ -275,7 +275,7 @@ def test_feeds_downstream_functions():
     m = tm.creation.capsule(height=20, radius=3, count=[16, 16])
     vox = sc.voxelize(m, 1.0)
     assert vox.dtype in INT_DTYPES
-    thinned = sc.thin(vox)
+    thinned = sc.binary.thin(vox)
     assert len(thinned) < len(vox)
     assert as_set(thinned) <= as_set(vox)
 

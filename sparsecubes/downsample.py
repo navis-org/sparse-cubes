@@ -28,6 +28,7 @@ import numpy as np
 
 from .core import pack, unpack, unique
 from .thinning import _validate, _check_extent
+from ._sparse import sparse_aware
 
 __all__ = ["downsample_graph"]
 
@@ -46,6 +47,7 @@ def _as_factor(factor):
     return f.astype(np.int64)
 
 
+@sparse_aware
 def downsample_graph(voxels, factor):
     """Downsample a sparse voxel cloud without introducing new connections.
 

@@ -565,3 +565,22 @@ def test_large_neuron_stays_bounded():
     assert betti(sk_a.nodes, sk_a.edges)[1] == 0
     assert len(sk_a.nodes) > 0
     assert dt_a < dt
+
+
+# --- `workers` is a speed knob only -----------------------------------------
+
+
+@pytest.mark.parametrize("shape", [solid_cylinder(), y_branch(), solid_cube(6)])
+def test_workers_does_not_change_the_skeleton(shape):
+    """Threading the DBF KD-tree query must not perturb the result."""
+    serial = sc.teasar_skeletonize(shape, workers=1)
+    threaded = sc.teasar_skeletonize(shape, workers=-1)
+    assert np.array_equal(serial.nodes, threaded.nodes)
+    assert np.array_equal(serial.edges, threaded.edges)
+    assert np.allclose(serial.radii, threaded.radii)
+
+
+@pytest.mark.parametrize("workers", [1, 2, -1])
+def test_workers_values_accepted(workers):
+    skel = sc.teasar_skeletonize(solid_cylinder(), workers=workers)
+    assert len(skel.nodes) > 0

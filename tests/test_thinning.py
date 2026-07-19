@@ -116,7 +116,7 @@ SHAPES = {
 @pytest.mark.parametrize("name", list(SHAPES))
 def test_thin_is_subset(name):
     v = SHAPES[name]
-    t = sc.thin(v)
+    t = sc.binary.thin(v)
     assert is_subset(t, v)
     assert t.dtype == v.dtype
 
@@ -124,14 +124,14 @@ def test_thin_is_subset(name):
 @pytest.mark.parametrize("name", list(SHAPES))
 def test_thin_one_voxel_wide(name):
     # No fully occupied 2x2x2 block may survive a medial-curve thinning.
-    t = sc.thin(SHAPES[name])
+    t = sc.binary.thin(SHAPES[name])
     assert not has_2x2x2_block(t)
 
 
 @pytest.mark.parametrize("name", list(SHAPES))
 def test_thin_idempotent(name):
-    t = sc.thin(SHAPES[name])
-    tt = sc.thin(t)
+    t = sc.binary.thin(SHAPES[name])
+    tt = sc.binary.thin(t)
     assert np.array_equal(np.unique(t, axis=0), np.unique(tt, axis=0))
 
 
@@ -141,27 +141,27 @@ def test_thin_preserves_components(name):
     # connected components is invariant, and a non-empty connected object never
     # thins away to nothing.
     v = SHAPES[name]
-    t = sc.thin(v)
+    t = sc.binary.thin(v)
     assert len(t) > 0
     assert n_components(t) == n_components(v)
 
 
 def test_thin_line_is_fixed_point():
     v = line(10)
-    assert np.array_equal(np.unique(sc.thin(v), axis=0), np.unique(v, axis=0))
+    assert np.array_equal(np.unique(sc.binary.thin(v), axis=0), np.unique(v, axis=0))
 
 
 def test_thin_cube_not_emptied():
     # Symmetric solid cubes must not vanish (they stay one connected component).
     for k in (3, 4, 5):
-        t = sc.thin(solid_cube(k))
+        t = sc.binary.thin(solid_cube(k))
         assert len(t) > 0
         assert n_components(t) == 1
 
 
 def test_thin_annulus_keeps_loop():
     # A ring must retain its hole: the thinned graph has first Betti number >= 1.
-    t = sc.thin(annulus(9, 5))
+    t = sc.binary.thin(annulus(9, 5))
     from sparsecubes.skeleton import _edges_26
 
     nodes, edges = _edges_26(t.astype(np.int64))
@@ -173,24 +173,24 @@ def test_thin_cylinder_is_a_curve():
     # A solid cylinder collapses to a single 1-wide centerline: one component and
     # far fewer voxels than the solid.
     v = solid_cylinder(4, 16)
-    t = sc.thin(v)
+    t = sc.binary.thin(v)
     assert n_components(t) == 1
     assert len(t) < len(v) / 5
 
 
 def test_thin_empty_and_single():
     empty = np.empty((0, 3), dtype=np.uint32)
-    assert sc.thin(empty).shape == (0, 3)
+    assert sc.binary.thin(empty).shape == (0, 3)
     single = np.array([[3, 3, 3]], dtype=np.uint32)
-    assert np.array_equal(sc.thin(single), single)
+    assert np.array_equal(sc.binary.thin(single), single)
 
 
 def test_thin_max_iterations():
     # Capping iterations stops early: the result is a (non-strict) superset of the
     # fully converged skeleton but still a subset of the input.
     v = solid_cylinder(4, 16)
-    partial = sc.thin(v, max_iterations=1)
-    full = sc.thin(v)
+    partial = sc.binary.thin(v, max_iterations=1)
+    full = sc.binary.thin(v)
     assert is_subset(full, partial) or len(partial) >= len(full)
     assert is_subset(partial, v)
 
@@ -199,16 +199,16 @@ def test_thin_extent_guard():
     # A coordinate range beyond pack()'s per-axis budget raises a clear error.
     v = np.array([[0, 0, 0], [2**21, 0, 0]], dtype=np.int64)
     with pytest.raises(ValueError, match="extent"):
-        sc.thin(v)
+        sc.binary.thin(v)
 
 
 def test_thin_bad_input():
     with pytest.raises(TypeError):
-        sc.thin([[1, 2, 3]])
+        sc.binary.thin([[1, 2, 3]])
     with pytest.raises(TypeError):
-        sc.thin(np.zeros((4, 2), dtype=np.int64))
+        sc.binary.thin(np.zeros((4, 2), dtype=np.int64))
     with pytest.raises(TypeError):
-        sc.thin(np.zeros((4, 3), dtype=np.float64))
+        sc.binary.thin(np.zeros((4, 3), dtype=np.float64))
 
 
 # --- cross-check against scikit-image (topology only) ----------------------
@@ -229,7 +229,7 @@ def test_thin_matches_skimage_topology(name):
     ski = skeletonize(grid, method="lee").astype(bool)
     ski_vox = np.argwhere(ski)
 
-    ours = sc.thin(v).astype(np.int64) - shift
+    ours = sc.binary.thin(v).astype(np.int64) - shift
 
     # Both preserve the object's component count; compare that invariant rather
     # than exact voxels (sub-field order differs from skimage's raster order).
@@ -243,7 +243,7 @@ def test_thin_no_perf_regression():
     voxels = np.load(DATA)
 
     t0 = time.perf_counter()
-    thinned = sc.thin(voxels)
+    thinned = sc.binary.thin(voxels)
     elapsed = time.perf_counter() - t0
 
     assert len(thinned) > 0

@@ -24,7 +24,7 @@ def test_thin_skeletonize_returns_skeleton():
 def test_thin_skeletonize_matches_centerline_of_thin():
     v = solid_cylinder(4, 14)
     a = sc.thin_skeletonize(v)
-    b = sc.centerline(sc.thin(v))
+    b = sc.centerline(sc.binary.thin(v))
     assert np.array_equal(a.nodes, b.nodes)
     assert np.array_equal(a.edges, b.edges)
 

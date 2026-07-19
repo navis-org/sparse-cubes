@@ -15,6 +15,7 @@ import numpy as np
 
 from .core import pack, log, unique, boundary_shell
 from .thinning import thin, _OFF26, _check_extent, _validate
+from ._sparse import sparse_aware
 
 __all__ = ["Skeleton", "centerline", "thin_skeletonize"]
 
@@ -291,6 +292,7 @@ def _radii(nodes, object_voxels, spacing):
     return np.asarray(dist, dtype=float)
 
 
+@sparse_aware
 def centerline(
     thinned,
     *,
@@ -365,6 +367,7 @@ def centerline(
     return Skeleton(nodes.astype(dtype), edges, r, spacing)
 
 
+@sparse_aware
 def thin_skeletonize(
     voxels,
     *,

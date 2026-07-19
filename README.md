@@ -24,6 +24,10 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
   SWC / networkx / trimesh.
 - **TEASAR skeletons** - well-centered medial-axis skeletons with radii, a sparse
   reimplementation of [`kimimaro`](https://github.com/seung-lab/kimimaro).
+- **Primitives** - morphology (dilate/erode/open/close), set algebra, connected
+  components and measurements, in `sparsecubes.binary` and `sparsecubes.measure`.
+- **Sparse-array interop** - every voxel-taking function also accepts a 3-D
+  `scipy.sparse.coo_array` and hands one back where that makes sense.
 
 
 ![example mesh](./_static/example_mesh.png)
@@ -92,11 +96,25 @@ Voxelization (the inverse of `sc.mesh`):
 >>> skel = sc.thin_skeletonize(sc.voxelize(m, 1.0))
 ```
 
+Primitives:
+
+```python
+>>> # Morphology and set algebra (voxels in -> voxels out)
+>>> grown = sc.binary.dilate(voxels, iterations=2)
+>>> clean = sc.binary.opening(voxels)          # strip specks and thin spurs
+>>> both = sc.binary.intersection(voxels, other)
+>>> # Labelling and measurements (voxels in -> numbers/labels out)
+>>> n, labels = sc.measure.connected_components(voxels)
+>>> body = sc.measure.largest_component(voxels)
+>>> sc.measure.volume(voxels, spacing=(1, 1, 2))
+>>> sc.measure.distance_transform(voxels)      # exact, sparse EDT
+```
+
 Skeletonization:
 
 ```python
 >>> # `thin` peels the object to a 1-voxel medial curve (a subset of the input)
->>> thinned = sc.thin(voxels)
+>>> thinned = sc.binary.thin(voxels)
 >>> # `thin_skeletonize` thins and extracts the centerline graph in one step
 >>> skel = sc.thin_skeletonize(voxels, min_branch_length=3, radii=True)
 >>> # ...or trace a well-centered TEASAR medial-axis skeleton
@@ -207,7 +225,7 @@ occupancy) that would be wasteful to densify for `scikit-image`'s thinning or
 ```python
 >>> import sparsecubes as sc
 >>> # `thin` peels the object to a 1-voxel medial curve (a subset of the input)
->>> thinned = sc.thin(voxels)
+>>> thinned = sc.binary.thin(voxels)
 >>> # `thin_skeletonize` thins and extracts the centerline graph in one step
 >>> skel = sc.thin_skeletonize(voxels, min_branch_length=3, radii=True)
 >>> skel.nodes            # (M, 3) voxel coordinates
@@ -272,11 +290,108 @@ Dijkstra). Both shine on large, thin, sparse structures - the same regime as the
 rest of `sparse-cubes`. For small/fat solids, densifying and calling
 `scikit-image` / `kimimaro` directly is simpler and faster.
 
+The distance-from-boundary KD-tree query is threaded by default (`workers=-1`).
+It is purely a speed knob - the skeleton is identical either way - and the same
+parameter is on `sc.measure.distance_transform`. Set `workers=1` when you are
+already parallelizing over objects yourself, e.g. inside a `multiprocessing`
+pool, where the default would oversubscribe the CPUs:
+
+```python
+>>> skel = sc.teasar_skeletonize(voxels)             # all cores (default)
+>>> skel = sc.teasar_skeletonize(voxels, workers=1)  # single-threaded
+```
+
 `teasar_skeletonize` transparently uses [`dijkstra3d-sparse`](https://pypi.org/project/dijkstra3d-sparse/)
 when it is installed to run Dijkstra straight over the voxel coordinates, which is
 markedly faster than the pure-`scipy` `csgraph` fallback. It is **optional but highly
 recommended** - `sparse-cubes` falls back to scipy without it. It ships with the
 `skeleton` extra, or install it on its own with `pip install sparse-cubes[recommended]`.
+
+## Primitives: `binary` and `measure`
+
+The top level carries the end-to-end pipelines (`mesh`, `voxelize`,
+`*_skeletonize`). The primitives they are built from live in two submodules, split
+by what they return:
+
+- **`sparsecubes.binary`** - voxel set(s) in, voxel set out.
+- **`sparsecubes.measure`** - voxel set in, numbers or labels out.
+
+| `sc.binary` | | `sc.measure` | |
+| --- | --- | --- | --- |
+| `dilate` / `erode` | grow / shrink by a neighbourhood | `connected_components` | `(n, labels)`, row-aligned |
+| `opening` / `closing` | strip specks / bridge gaps | `largest_component` | biggest blob only |
+| `union` / `intersection` | set algebra over clouds | `remove_small_objects` | despeckle by voxel count |
+| `difference` / `symmetric_difference` | subtraction / XOR | `volume` / `surface_area` | with optional `spacing` |
+| `isin` | per-row membership mask | `bounding_box` / `centroid` | index bounds / centre of mass |
+| `thin` / `fill_cavities` | topological thinning / void fill | `distance_transform` | exact sparse EDT |
+
+```python
+>>> import sparsecubes as sc
+>>> clean = sc.binary.opening(voxels)                 # drop surface noise
+>>> body = sc.measure.largest_component(clean)        # keep the main object
+>>> skel = sc.teasar_skeletonize(body)                # then the usual pipeline
+```
+
+All of it stays sparse. `dilate`/`erode` accept `connectivity=6|18|26` and
+`iterations=n` with the same semantics as `scipy.ndimage`, and the morphology is
+tested to agree with it voxel-for-voxel - the difference is that `scipy` needs the
+bounding box densified first and these do not. Likewise `measure.distance_transform`
+returns exactly what `scipy.ndimage.distance_transform_edt` would, computed from
+the sparse background shell instead of a dense grid.
+
+Two caveats worth knowing. `closing` can **fuse** structures that pass within
+`2 * iterations` voxels of each other; when you specifically want enclosed voids
+filled without that risk, `fill_cavities(mode="exact")` is topology-safe.
+And `connected_components` supports `connectivity=6` or `26` only (not 18), since
+the underlying routine does not distinguish 18 from 26.
+
+> **Moved in 0.4.0.** `sc.thin` and `sc.fill_cavities` are now `sc.binary.thin`
+> and `sc.binary.fill_cavities` - they are primitives, not pipelines. The old
+> names raise an `AttributeError` naming the new spelling.
+
+## Working with `scipy.sparse` arrays
+
+An `(N, 3)` index array and a 3-D sparse array are the same thing in different
+clothing - a COO volume *is* a list of occupied coordinates - so every
+voxel-taking function accepts either:
+
+```python
+>>> from scipy.sparse import coo_array
+>>> vol = coo_array((data, (xs, ys, zs)), shape=(512, 512, 128))
+>>> sc.mesh(vol)                        # -> Trimesh
+>>> sc.measure.volume(vol)              # -> float
+>>> sc.binary.dilate(vol)               # -> coo_array, modelled on the input
+>>> sc.teasar_skeletonize(vol)          # -> Skeleton
+```
+
+Operations that return a **voxel set** (`binary.*`, `measure.largest_component`,
+`measure.remove_small_objects`) give you a `coo_array` back, with the input's
+dtype. Those returning something with no sparse form - a mesh, a `Skeleton`,
+labels, a scalar - return it unchanged. Mixing is fine: one sparse argument is
+enough, so `sc.binary.union(sparse_a, ndarray_b)` returns sparse.
+
+Three things worth knowing:
+
+- **scipy stays optional.** `sparse-cubes` never imports it to make this work.
+  Detection is duck-typing on the argument's type, and the module is only fetched
+  from `sys.modules` - which a sparse argument proves is already populated. The
+  overhead on the ordinary ndarray path is about 1.5 µs per call.
+- **3-D COO only.** scipy supports 3-D in the COO format alone (CSR/DOK/LIL are
+  still 2-D as of scipy 1.15). Passing a 2-D matrix raises - it cannot represent
+  a volume.
+- **The shape is a floor, not a clamp.** An operation that grows the object past
+  the array's bounds widens the shape to fit rather than truncating, so no voxel
+  is ever silently dropped. The exception is growth *below* index 0, which a
+  sparse array simply cannot represent and which raises:
+
+  ```python
+  >>> vol = coo_array(..., shape=(4, 4, 4))   # object touching index 0
+  >>> sc.binary.dilate(vol)
+  ValueError: Result contains negative coordinates (min (-1, -1, -1)) ...
+  ```
+
+  Pad the array first, or pass an `(N, 3)` index array - those are unbounded and
+  handle negative coordinates natively.
 
 ## Notes
 - The mesh might have non-manifold edges. Trimesh will report these
