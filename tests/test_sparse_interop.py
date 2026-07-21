@@ -216,6 +216,37 @@ def test_skeletonizers_accept_sparse():
         assert np.array_equal(a.edges, b.edges)
 
 
+def test_index_of_returns_plain_indices():
+    a = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.int64)
+    b = np.array([[1, 0, 0]], dtype=np.int64)
+    idx = sb.index_of(_coo(a, shape=(4, 4, 4)), _coo(b, shape=(4, 4, 4)))
+    assert isinstance(idx, np.ndarray) and idx.dtype == np.int64
+    assert list(idx) == [-1, 0]
+
+
+@pytest.mark.parametrize("op", ["iou", "dice"])
+def test_similarity_returns_a_plain_float(op):
+    a, b = solid_cube(4), solid_cube(4) + [2, 0, 0]
+    got = getattr(sm, op)(_coo(a), _coo(b))
+    assert isinstance(got, float)
+    assert got == getattr(sm, op)(a, b)
+
+
+def test_edges_accepts_sparse():
+    vox = solid_cube(4)
+    n_sparse, e_sparse = sc.edges(_coo(vox))
+    n_dense, e_dense = sc.edges(vox)
+    assert np.array_equal(n_sparse, n_dense)  # a graph has no sparse form
+    assert np.array_equal(e_sparse, e_dense)
+
+
+def test_downsample_mirrors_sparse_input():
+    vox = solid_cube(6)
+    out = sc.downsample(_coo(vox), 2)
+    assert is_sparse(out)
+    assert _as_set(to_voxels(out)) == _as_set(sc.downsample(vox, 2))
+
+
 def test_downsample_graph_accepts_sparse():
     vox = solid_cube(6)
     c_sparse, e_sparse = sc.downsample_graph(_coo(vox), 2)

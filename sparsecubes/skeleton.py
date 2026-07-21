@@ -14,7 +14,8 @@ from collections import deque
 import numpy as np
 
 from .core import pack, log, unique, boundary_shell
-from .thinning import thin, _OFF26, _check_extent, _validate
+from .thinning import thin, _check_extent, _validate
+from .graph import _edge_pairs
 from ._sparse import sparse_aware
 
 __all__ = ["Skeleton", "centerline", "thin_skeletonize"]
@@ -131,28 +132,14 @@ def _edges_26(nodes):
 
     Nodes are reordered by their packed key so a node's index equals its
     position in the sorted key array (which `searchsorted` returns for lookups).
+    The adjacency itself comes from `graph._edge_pairs`, which walks the positive
+    key deltas only - half the lookups of a full 26-way scan, and without the
+    ``(M, 26, 3)`` neighbour block a scan would need to hold.
     """
     shift = nodes.min(axis=0) - 1
-    base = nodes - shift
-    keys = pack(base)
+    keys = pack(nodes - shift)
     order = np.argsort(keys, kind="stable")
-    nodes = nodes[order]
-    base = base[order]
-    keys_sorted = keys[order]
-
-    m = len(nodes)
-    nb = base[:, None, :] + _OFF26[None, :, :]  # (M, 26, 3)
-    nb_keys = pack(nb.reshape(-1, 3)).reshape(m, 26)
-    pos = np.clip(np.searchsorted(keys_sorted, nb_keys), 0, m - 1)
-    hit = keys_sorted[pos] == nb_keys  # (M, 26)
-
-    if not hit.any():
-        return nodes, np.empty((0, 2), dtype=np.int64)
-
-    src = np.repeat(np.arange(m), 26)[hit.ravel()]
-    dst = pos[hit]
-    e = np.stack([np.minimum(src, dst), np.maximum(src, dst)], axis=1)
-    return nodes, unique(e, axis=0)
+    return nodes[order], _edge_pairs(keys[order], 26)
 
 
 def _validate_edges(edges, m):

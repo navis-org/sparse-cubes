@@ -247,3 +247,146 @@ def test_centerline_edges_injection_keeps_components():
     coords, edges = downsample_graph(vox, 2)
     sk = sc.centerline(coords, edges=edges)
     assert betti(sk.nodes, sk.edges)[0] == 2
+
+
+# --- plain (coordinate) downsampling ---------------------------------------
+
+FACTORS = [1, 2, 3, (1, 2, 3), (2, 2, 1)]
+
+
+@pytest.mark.parametrize("factor", FACTORS)
+@pytest.mark.parametrize("name", sorted(SHAPES))
+def test_downsample_matches_the_naive_pool(name, factor):
+    """The coordinates are exactly ``unique(v // factor)`` - no dense grid used."""
+    vox = SHAPES[name]
+    expected = np.unique(vox.astype(np.int64) // np.asarray(factor), axis=0)
+    assert np.array_equal(sc.downsample(vox, factor), expected)
+
+
+@pytest.mark.parametrize("factor", FACTORS)
+def test_downsample_matches_the_naive_pool_with_negatives(factor):
+    """Floor division, not truncation: negative coordinates must pool correctly."""
+    rng = np.random.RandomState(0)
+    vox = rng.randint(-25, 25, (500, 3)).astype(np.int64)
+    expected = np.unique(vox // np.asarray(factor), axis=0)
+    assert np.array_equal(sc.downsample(vox, factor), expected)
+
+
+def test_downsample_factor_one_is_the_deduplicated_input():
+    vox = np.concatenate([solid_cube(3), solid_cube(3)])
+    assert np.array_equal(sc.downsample(vox, 1), np.unique(vox, axis=0))
+
+
+def test_downsample_shares_coordinates_with_downsample_graph():
+    """The two agree on *which* cells exist; only the adjacency story differs."""
+    for vox in SHAPES.values():
+        coords, _ = downsample_graph(vox, 2)
+        assert np.array_equal(sc.downsample(vox, 2), coords)
+
+
+def test_downsample_is_monotone_in_factor():
+    vox = solid_cylinder(4, 20)
+    assert len(sc.downsample(vox, 1)) >= len(sc.downsample(vox, 2)) >= len(
+        sc.downsample(vox, 4)
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.int32, np.int64, np.uint32])
+def test_downsample_preserves_dtype(dtype):
+    assert sc.downsample(solid_cube(5).astype(dtype), 2).dtype == dtype
+
+
+def test_downsample_survives_an_extent_that_only_fits_once_pooled():
+    """Pooling is what brings an over-wide volume into range - do not reject it."""
+    vox = np.array([[0, 0, 0], [3_000_000, 0, 0]], dtype=np.int64)
+    with pytest.raises(ValueError, match="extent"):
+        downsample_graph(vox, 4)  # the fine graph genuinely cannot be built
+    assert len(sc.downsample(vox, 4)) == 2  # ... but pooling alone is fine
+
+
+# --- value aggregation ------------------------------------------------------
+
+
+@pytest.mark.parametrize("agg", ["max", "min", "sum", "mean"])
+@pytest.mark.parametrize("factor", [2, 3, (1, 2, 3)])
+def test_downsample_values_match_a_per_cell_oracle(agg, factor):
+    rng = np.random.RandomState(1)
+    vox = np.unique(rng.randint(0, 12, (400, 3)).astype(np.int64), axis=0)
+    values = rng.rand(len(vox))
+
+    coords, out = sc.downsample(vox, factor, values=values, agg=agg)
+    cells = vox // np.asarray(factor)
+    assert np.array_equal(coords, np.unique(cells, axis=0))
+
+    reduce = {"max": np.max, "min": np.min, "sum": np.sum, "mean": np.mean}[agg]
+    for i, cell in enumerate(coords):
+        assert out[i] == pytest.approx(reduce(values[(cells == cell).all(axis=1)]))
+
+
+def test_downsample_values_align_with_coordinates():
+    """The pairing is the whole point: cell i's value must be cell i's value."""
+    vox = np.array([[0, 0, 0], [1, 0, 0], [4, 0, 0]], dtype=np.int64)
+    coords, out = sc.downsample(vox, 2, values=np.array([1.0, 5.0, 3.0]))
+    assert np.array_equal(coords, [[0, 0, 0], [2, 0, 0]])
+    assert np.array_equal(out, [5.0, 3.0])
+
+
+@pytest.mark.parametrize("agg", ["max", "min", "sum", "mean"])
+def test_downsample_multi_column_values(agg):
+    rng = np.random.RandomState(2)
+    vox = np.unique(rng.randint(0, 10, (300, 3)).astype(np.int64), axis=0)
+    values = rng.rand(len(vox), 4)
+    coords, out = sc.downsample(vox, 3, values=values, agg=agg)
+    assert out.shape == (len(coords), 4)
+    # Column c must equal the same reduction run on column c alone.
+    for c in range(4):
+        _, col = sc.downsample(vox, 3, values=values[:, c], agg=agg)
+        assert np.allclose(out[:, c], col)
+
+
+def test_downsample_sum_widens_small_integer_values():
+    """Pooling uint8 intensities must not silently wrap around."""
+    vox = np.stack([np.arange(4), np.zeros(4), np.zeros(4)], axis=1).astype(np.int64)
+    values = np.full(4, 200, dtype=np.uint8)
+    _, out = sc.downsample(vox, 4, values=values, agg="sum")
+    assert out.dtype == np.int64 and out[0] == 800
+
+
+def test_downsample_max_preserves_the_value_dtype():
+    vox = np.stack([np.arange(4), np.zeros(4), np.zeros(4)], axis=1).astype(np.int64)
+    values = np.array([1, 7, 3, 2], dtype=np.uint8)
+    _, out = sc.downsample(vox, 4, values=values, agg="max")
+    assert out.dtype == np.uint8 and out[0] == 7
+
+
+def test_downsample_without_values_returns_coordinates_only():
+    out = sc.downsample(solid_cube(4), 2)
+    assert isinstance(out, np.ndarray) and out.ndim == 2 and out.shape[1] == 3
+
+
+def test_downsample_rejects_misaligned_values():
+    with pytest.raises(ValueError, match="aligned"):
+        sc.downsample(solid_cube(4), 2, values=np.zeros(3))
+
+
+def test_downsample_rejects_unknown_agg():
+    with pytest.raises(ValueError, match="agg must be"):
+        sc.downsample(solid_cube(4), 2, values=np.zeros(64), agg="median")
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, (1, 2), (1, 2, 3, 4)])
+def test_downsample_rejects_bad_factor(bad):
+    with pytest.raises(ValueError, match="factor"):
+        sc.downsample(solid_cube(4), bad)
+
+
+def test_downsample_on_empty():
+    empty = np.empty((0, 3), dtype=np.int64)
+    assert sc.downsample(empty, 2).shape == (0, 3)
+    coords, out = sc.downsample(empty, 2, values=np.zeros(0))
+    assert coords.shape == (0, 3) and len(out) == 0
+
+
+def test_downsample_rejects_non_integer():
+    with pytest.raises(TypeError, match="integer"):
+        sc.downsample(solid_cube(3).astype(float), 2)

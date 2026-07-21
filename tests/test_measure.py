@@ -252,6 +252,82 @@ def test_distance_transform_on_empty():
     assert len(sm.distance_transform(np.empty((0, 3), dtype=np.int64))) == 0
 
 
+# --- set similarity ---------------------------------------------------------
+
+
+PAIRS = {
+    "identical": (solid_cube(4), solid_cube(4)),
+    "disjoint": (solid_cube(3), solid_cube(3) + [10, 0, 0]),
+    "partial": (solid_cube(4), solid_cube(4) + [2, 0, 0]),
+    "nested": (solid_cube(5), solid_cube(2) + [1, 1, 1]),
+    "shapes": (l_shape(), line(6)),
+    "hollow": (hollow_box(7, 3), solid_cube(5)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PAIRS))
+def test_iou_and_dice_match_python_sets(name):
+    a, b = PAIRS[name]
+    A, B = _as_set(a), _as_set(b)
+    assert sm.iou(a, b) == pytest.approx(len(A & B) / len(A | B))
+    assert sm.dice(a, b) == pytest.approx(2 * len(A & B) / (len(A) + len(B)))
+
+
+@pytest.mark.parametrize("name", sorted(PAIRS))
+def test_iou_agrees_with_the_set_operations(name):
+    """The definition, spelled out - just without allocating the intermediates."""
+    from sparsecubes import binary as sb
+
+    a, b = PAIRS[name]
+    assert sm.iou(a, b) == pytest.approx(
+        len(sb.intersection(a, b)) / len(sb.union(a, b))
+    )
+
+
+@pytest.mark.parametrize("fn", [sm.iou, sm.dice])
+@pytest.mark.parametrize("name", sorted(PAIRS))
+def test_similarity_is_symmetric_and_bounded(fn, name):
+    a, b = PAIRS[name]
+    assert fn(a, b) == pytest.approx(fn(b, a))
+    assert 0.0 <= fn(a, b) <= 1.0
+
+
+@pytest.mark.parametrize("fn", [sm.iou, sm.dice])
+def test_similarity_extremes(fn):
+    cube = solid_cube(4)
+    assert fn(cube, cube) == 1.0
+    assert fn(cube, cube + [10, 0, 0]) == 0.0
+
+
+def test_dice_follows_iou():
+    """The two are monotone transforms of each other: dice = 2*iou / (1 + iou)."""
+    for a, b in PAIRS.values():
+        i = sm.iou(a, b)
+        assert sm.dice(a, b) == pytest.approx(2 * i / (1 + i))
+
+
+@pytest.mark.parametrize("fn", [sm.iou, sm.dice])
+def test_similarity_counts_unique_voxels(fn):
+    """Duplicate rows are a storage detail, not extra overlap."""
+    a = solid_cube(3)
+    assert fn(np.concatenate([a, a]), a) == 1.0
+
+
+@pytest.mark.parametrize("fn", [sm.iou, sm.dice])
+def test_similarity_on_empty(fn):
+    empty = np.empty((0, 3), dtype=np.int64)
+    assert fn(empty, empty) == 1.0, "two empty sets are identical"
+    assert fn(solid_cube(3), empty) == 0.0
+    assert fn(empty, solid_cube(3)) == 0.0
+
+
+@pytest.mark.parametrize("fn", [sm.iou, sm.dice])
+def test_similarity_with_negative_and_far_apart_coordinates(fn):
+    a = np.array([[-5, -5, -5], [100000, 5, 7]], dtype=np.int64)
+    b = np.array([[-5, -5, -5]], dtype=np.int64)
+    assert fn(a, b) == pytest.approx({sm.iou: 0.5, sm.dice: 2 / 3}[fn])
+
+
 # --- input validation -------------------------------------------------------
 
 

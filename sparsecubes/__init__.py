@@ -11,11 +11,14 @@ from .core import (
 from .voxelization import voxelize
 from .skeleton import thin_skeletonize, centerline, Skeleton
 from .teasar import teasar_skeletonize
-from .downsample import downsample_graph
+from .downsample import downsample, downsample_graph
+from .graph import edges
 from .__version__ import __version__
 
-# The top level carries the end-to-end pipelines; the primitives they are built
-# from live in the two submodules:
+# The top level carries the end-to-end pipelines, plus the operations that change
+# what the voxel set *is* rather than which voxels are in it - `edges` (voxels ->
+# graph) and `downsample`/`downsample_graph` (voxels -> a coarser lattice). The
+# primitives that stay on one lattice live in the two submodules:
 #   sparsecubes.binary  - voxel set(s) -> voxel set (morphology, set algebra)
 #   sparsecubes.measure - voxel set -> numbers / labels
 __all__ = [
@@ -31,6 +34,8 @@ __all__ = [
     "thin_skeletonize",
     "centerline",
     "teasar_skeletonize",
+    "edges",
+    "downsample",
     "downsample_graph",
     "Skeleton",
     "__version__",

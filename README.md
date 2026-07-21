@@ -26,6 +26,8 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
   reimplementation of [`kimimaro`](https://github.com/seung-lab/kimimaro).
 - **Primitives** - morphology (dilate/erode/open/close), set algebra, connected
   components and measurements, in `sparsecubes.binary` and `sparsecubes.measure`.
+- **Adjacency & downsampling** - the voxel graph as an explicit edge list, and
+  pooling onto a coarser lattice (optionally connectivity-safe).
 - **Sparse-array interop** - every voxel-taking function also accepts a 3-D
   `scipy.sparse.coo_array` and hands one back where that makes sense.
 
@@ -322,8 +324,9 @@ by what they return:
 | `opening` / `closing` | strip specks / bridge gaps | `largest_component` | biggest blob only |
 | `union` / `intersection` | set algebra over clouds | `remove_small_objects` | despeckle by voxel count |
 | `difference` / `symmetric_difference` | subtraction / XOR | `volume` / `surface_area` | with optional `spacing` |
-| `isin` | per-row membership mask | `bounding_box` / `centroid` | index bounds / centre of mass |
+| `isin` / `index_of` | per-row membership / row lookup | `bounding_box` / `centroid` | index bounds / centre of mass |
 | `thin` / `fill_cavities` | topological thinning / void fill | `distance_transform` | exact sparse EDT |
+| | | `iou` / `dice` | set similarity of two clouds |
 
 ```python
 >>> import sparsecubes as sc
@@ -348,6 +351,75 @@ the underlying routine does not distinguish 18 from 26.
 > **Moved in 0.4.0.** `sc.thin` and `sc.fill_cavities` are now `sc.binary.thin`
 > and `sc.binary.fill_cavities` - they are primitives, not pipelines. The old
 > names raise an `AttributeError` naming the new spelling.
+
+### Carrying per-voxel values
+
+The primitives map coordinates to coordinates; real image data carries a value
+per voxel. `isin` re-aligns values through the *shrinking* operations (`erode`,
+`thin`, `difference`), where every output row came from the input:
+
+```python
+>>> small = sc.binary.erode(voxels)
+>>> small_values = values[sc.binary.isin(voxels, small)]
+```
+
+For the *growing* ones (`dilate`, `union`, `fill_cavities`) some output rows are
+new, so you need to know where each one came from - that is `index_of`, which
+returns the row index in the source or `-1`:
+
+```python
+>>> grown = sc.binary.dilate(voxels)
+>>> src = sc.binary.index_of(grown, voxels)      # -1 for the newly added voxels
+>>> grown_values = np.where(src >= 0, values[src], fill)
+```
+
+## Adjacency and downsampling
+
+Three operations change what the voxel set *is* - its graph, or its lattice -
+rather than which voxels are in it, so they sit at the top level:
+
+```python
+>>> nodes, edges = sc.edges(voxels, connectivity=26)  # the voxel graph
+>>> coarse = sc.downsample(voxels, 2)                 # pool onto a coarser grid
+>>> coarse, coarse_edges = sc.downsample_graph(voxels, 2)   # connectivity-safe
+```
+
+`edges` returns the deduplicated, sorted `nodes` plus `(E, 2)` index pairs into
+them, canonical (`lo < hi`) and deduplicated - one entry per undirected edge.
+It is the primitive underneath `centerline`, exposed for handing to networkx /
+igraph or injecting via `teasar_skeletonize(edges=...)`. It walks *positive*
+packed-key deltas only, so each undirected edge is found exactly once, and costs
+one `searchsorted` per delta - no KD-tree, no dense neighbour block.
+
+`downsample` pools voxels into `factor`-sized cells (`v // factor`,
+deduplicated) - the sparse counterpart of `scipy.ndimage.zoom` on a dense grid.
+`factor` may be a length-3 tuple for anisotropic pooling. Because several fine
+voxels collapse into one coarse cell, per-voxel data has to be *reduced* rather
+than re-indexed, which it will do for you:
+
+```python
+>>> coarse, coarse_values = sc.downsample(voxels, 2, values=intensity, agg="max")
+```
+
+`agg` is `"max"` (default; preserves peaks), `"min"`, `"mean"` or `"sum"`.
+Integer values accumulate in `int64` for `sum`/`mean`, so pooling `uint8`
+intensities does not wrap around. Remember to scale any `spacing` you carry
+alongside by `factor`.
+
+The catch with plain pooling is that it can **fuse** structures less than
+`2 * factor` apart - adjacency is implicit in the coarse coordinates, so cells at
+`(0,0,0)` and `(1,0,0)` read as connected whether or not anything joined them.
+When that matters (skeletonizing, counting components), use `downsample_graph`,
+which returns the coarse cells *plus an explicit edge list* lifted from the fine
+26-connectivity graph. No connection is introduced that did not exist, and the
+connected-component partition is preserved exactly. Feed the edges on rather than
+re-deriving them from the coarse geometry - re-deriving would reintroduce the
+very links it avoided:
+
+```python
+>>> coarse, coarse_edges = sc.downsample_graph(voxels, 2)
+>>> skel = sc.teasar_skeletonize(coarse, edges=coarse_edges, spacing=spacing * 2)
+```
 
 ## Working with `scipy.sparse` arrays
 

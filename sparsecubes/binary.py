@@ -22,10 +22,11 @@ from ._keys import (
     sorted_hit,
     to_common_keys,
     to_keys,
+    to_row_keys,
     unique,
 )
 from ._sparse import sparse_aware
-from .core import fill_cavities, pack
+from .core import fill_cavities
 from .thinning import thin
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "difference",
     "symmetric_difference",
     "isin",
+    "index_of",
     "thin",
     "fill_cavities",
 ]
@@ -241,11 +243,57 @@ def isin(voxels, other):
     Returns
     -------
     (N,) boolean array, aligned with `voxels` row for row.
+
+    See Also
+    --------
+    index_of : *where* in `other` each voxel is, not just whether.
     """
-    keys, shift, _ = to_common_keys([voxels, other], names=["voxels", "other"])
-    _, b = keys
-    if len(voxels) == 0:
+    # Row keys for `voxels` (alignment), sorted-unique for `other` (lookup).
+    keys, _, _ = to_row_keys([voxels, other], names=["voxels", "other"])
+    own, b = keys
+    if len(own) == 0:
         return np.zeros(0, dtype=bool)
-    # Pack `voxels` as given (not deduplicated/sorted) to keep the row alignment.
-    own = pack(voxels.astype(np.int64, copy=False) - shift)
-    return sorted_hit(own, b)
+    return sorted_hit(own, unique(b))
+
+
+@sparse_aware
+def index_of(voxels, other):
+    """Locate each row of `voxels` in `other`: its row index there, or ``-1``.
+
+    The lookup that makes it possible to carry per-voxel data (intensity,
+    confidence, labels) through the *growing* operations. `isin` covers the
+    shrinking ones - `erode`, `thin`, `difference` - where every output row came
+    from the input. After a `dilate`, `union` or `fill_cavities` some output rows
+    are new, and this is what tells you which::
+
+        out = binary.dilate(voxels)
+        src = binary.index_of(out, voxels)
+        out_values = np.where(src >= 0, values[src], fill)
+
+    Parameters
+    ----------
+    voxels :    (N, 3) integer array of XYZ voxel coordinates. Row order is
+                preserved; duplicate rows each get the same answer.
+    other :     (M, 3) integer array to look the voxels up in. Need not be
+                sorted or deduplicated; where it holds a coordinate more than
+                once the *lowest* matching row index is returned.
+
+    Returns
+    -------
+    (N,) int64 array, aligned with `voxels` row for row. Entry ``i`` is the row
+    index in `other` of ``voxels[i]``, or ``-1`` if that voxel is absent.
+    Equivalent to ``isin(voxels, other)`` under ``>= 0``, so use `isin` when the
+    mask is all you need.
+    """
+    keys, _, _ = to_row_keys([voxels, other], names=["voxels", "other"])
+    q, src = keys
+    if len(q) == 0:
+        return np.empty(0, dtype=np.int64)
+    if len(src) == 0:
+        return np.full(len(q), -1, dtype=np.int64)
+    # Stable argsort, so ties within an equal-key run stay in row order and
+    # `searchsorted`'s left-hand landing point is the lowest matching row.
+    order = np.argsort(src, kind="stable")
+    ref = src[order]
+    pos = np.clip(np.searchsorted(ref, q), 0, len(ref) - 1)
+    return np.where(ref[pos] == q, order[pos], -1).astype(np.int64, copy=False)

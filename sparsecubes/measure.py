@@ -16,6 +16,7 @@ from ._keys import (
     key_deltas,
     neighbor_offsets,
     sorted_hit,
+    to_common_keys,
     to_keys,
     unique,
     validate,
@@ -33,6 +34,8 @@ __all__ = [
     "bounding_box",
     "centroid",
     "distance_transform",
+    "iou",
+    "dice",
 ]
 
 
@@ -208,6 +211,66 @@ def centroid(voxels, spacing=None):
     c = unique(voxels, axis=0).astype(float).mean(axis=0)
     s = as_spacing(spacing)
     return c * s if s is not None else c
+
+
+def _overlap(voxels, other):
+    """``(n_shared, n_voxels, n_other)``, all counted over *unique* voxels.
+
+    One packed-key pass: `to_common_keys` sorts and deduplicates both sets onto a
+    shared origin, and a single membership scan gives the intersection size. The
+    union size follows by inclusion-exclusion, so neither intermediate set is
+    ever materialised.
+    """
+    keys, _, _ = to_common_keys([voxels, other], names=["voxels", "other"])
+    a, b = keys
+    if len(a) == 0 or len(b) == 0:
+        return 0, len(a), len(b)
+    return int(sorted_hit(a, b).sum()), len(a), len(b)
+
+
+@sparse_aware
+def iou(voxels, other):
+    """Intersection over union (Jaccard index) of two voxel sets.
+
+    Both sets are treated as sets - duplicate rows count once - so this is
+    ``|A & B| / |A | B|``, in ``[0, 1]``. Computed by a single membership scan
+    over packed keys rather than by building `binary.intersection` and
+    `binary.union`, which would allocate both results.
+
+    The two sets need not share a bounding box, but they *do* have to live on the
+    same lattice: coordinates are compared as given, so rescale or offset one
+    yourself first if their grids differ.
+
+    Parameters
+    ----------
+    voxels, other : (N, 3) / (M, 3) integer arrays of XYZ voxel coordinates.
+
+    Returns
+    -------
+    float. Two empty sets are identical, so their IoU is 1.0; an empty set
+    against a non-empty one is 0.0.
+    """
+    shared, n_a, n_b = _overlap(voxels, other)
+    denom = n_a + n_b - shared
+    return 1.0 if denom == 0 else shared / denom
+
+
+@sparse_aware
+def dice(voxels, other):
+    """Dice (Sørensen) coefficient of two voxel sets: ``2|A & B| / (|A| + |B|)``.
+
+    The same measurement as `iou` on a different scale - both are monotone in the
+    overlap and rank pairs identically (``dice = 2 * iou / (1 + iou)``). Dice is
+    the segmentation-benchmark convention; IoU the detection one. See `iou` for
+    the parameters and the same-lattice requirement.
+
+    Returns
+    -------
+    float in ``[0, 1]``; 1.0 for two empty sets.
+    """
+    shared, n_a, n_b = _overlap(voxels, other)
+    denom = n_a + n_b
+    return 1.0 if denom == 0 else 2.0 * shared / denom
 
 
 @sparse_aware

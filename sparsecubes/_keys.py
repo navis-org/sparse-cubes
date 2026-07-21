@@ -97,13 +97,11 @@ def to_keys(voxels, margin=1, name="voxels"):
     return unique(pack(v)), shift
 
 
-def to_common_keys(arrays, margin=0, names=None):
-    """Pack several voxel sets onto one shared origin.
+def _common_origin(arrays, margin, names):
+    """Validate `arrays` and find the shared origin their keys are measured from.
 
-    Returns ``(list_of_key_arrays, shift, dtype)``. A shared shift is what makes
-    the keys comparable across sets, so set algebra reduces to sorted-array
-    membership. Empty inputs pack to empty key arrays and do not constrain the
-    origin. Raises if the *combined* extent leaves pack()'s range.
+    Returns ``(shift, dtype)``, or ``(None, dtype)`` when every input is empty -
+    empty sets do not constrain the origin and have no keys to place on it.
     """
     names = names or [f"voxels[{i}]" for i in range(len(arrays))]
     for arr, name in zip(arrays, names):
@@ -112,15 +110,54 @@ def to_common_keys(arrays, margin=0, names=None):
 
     filled = [a for a in arrays if len(a)]
     if not filled:
-        return [np.empty(0, dtype=np.int64) for _ in arrays], np.zeros(3, np.int64), dtype
+        return None, dtype
 
     lo = np.min([a.min(axis=0) for a in filled], axis=0).astype(np.int64)
     hi = np.max([a.max(axis=0) for a in filled], axis=0).astype(np.int64)
     shift = lo - margin
     _check_range(int((hi - shift).max()), margin)
+    return shift, dtype
+
+
+def to_common_keys(arrays, margin=0, names=None):
+    """Pack several voxel sets onto one shared origin.
+
+    Returns ``(list_of_key_arrays, shift, dtype)``, each key array sorted and
+    deduplicated. A shared shift is what makes the keys comparable across sets,
+    so set algebra reduces to sorted-array membership. Empty inputs pack to empty
+    key arrays and do not constrain the origin. Raises if the *combined* extent
+    leaves pack()'s range.
+
+    Use `to_row_keys` instead when the result has to stay aligned with the
+    caller's rows.
+    """
+    shift, dtype = _common_origin(arrays, margin, names)
+    if shift is None:
+        return [np.empty(0, dtype=np.int64) for _ in arrays], np.zeros(3, np.int64), dtype
 
     keys = [
         unique(pack(a.astype(np.int64, copy=False) - shift))
+        if len(a)
+        else np.empty(0, dtype=np.int64)
+        for a in arrays
+    ]
+    return keys, shift, dtype
+
+
+def to_row_keys(arrays, margin=0, names=None):
+    """Pack several voxel sets onto one shared origin, *preserving row order*.
+
+    Same contract as `to_common_keys` minus the sort and dedup, so key ``i`` is
+    row ``i`` of the corresponding input. That alignment is the whole point for
+    the per-row operations (`binary.isin`, `binary.index_of`), which have to hand
+    back an answer the caller can lay against their own array.
+    """
+    shift, dtype = _common_origin(arrays, margin, names)
+    if shift is None:
+        return [np.empty(0, dtype=np.int64) for _ in arrays], np.zeros(3, np.int64), dtype
+
+    keys = [
+        pack(a.astype(np.int64, copy=False) - shift)
         if len(a)
         else np.empty(0, dtype=np.int64)
         for a in arrays

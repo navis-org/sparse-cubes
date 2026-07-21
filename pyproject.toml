@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sparse-cubes"
 dynamic = ["version"]
-description = "Fast, memory-efficient operations on sparse (N, 3) voxel data: meshing, voxelization, thinning and skeletonization"
+description = "Fast, memory-efficient operations on sparse (N, 3) voxel data: meshing, voxelization, morphology, thinning and skeletonization"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GNU GPL V3" }
@@ -22,6 +22,9 @@ keywords = [
     "medial axis",
     "centerline",
     "teasar",
+    "morphology",
+    "connected components",
+    "downsampling",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

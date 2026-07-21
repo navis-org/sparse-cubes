@@ -184,6 +184,82 @@ def test_isin_handles_duplicate_rows(ab):
     assert list(sb.isin(dup, b)) == [True, False, True]
 
 
+# --- index_of ---------------------------------------------------------------
+
+
+def _index_of_oracle(query, source):
+    """First matching row index in `source` for each row of `query`, else -1."""
+    out = []
+    for row in np.asarray(query):
+        hits = np.flatnonzero((np.asarray(source) == row).all(axis=1))
+        out.append(int(hits[0]) if len(hits) else -1)
+    return out
+
+
+def test_index_of_locates_rows(ab):
+    a, b = ab
+    idx = sb.index_of(a, b)
+    assert idx.shape == (len(a),) and idx.dtype == np.int64
+    assert list(idx) == _index_of_oracle(a, b)
+
+
+def test_index_of_agrees_with_isin(ab):
+    a, b = ab
+    assert list(sb.index_of(a, b) >= 0) == list(sb.isin(a, b))
+
+
+def test_index_of_matches_oracle_on_random_clouds():
+    rng = np.random.RandomState(0)
+    source = rng.randint(0, 8, (200, 3)).astype(np.int64)
+    query = rng.randint(0, 8, (150, 3)).astype(np.int64)
+    assert list(sb.index_of(query, source)) == _index_of_oracle(query, source)
+
+
+def test_index_of_is_independent_of_source_row_order():
+    """Shuffling `source` must move the indices with it, not change the answer."""
+    rng = np.random.RandomState(1)
+    source = rng.randint(0, 6, (120, 3)).astype(np.int64)
+    query = rng.randint(0, 6, (80, 3)).astype(np.int64)
+    perm = rng.permutation(len(source))
+    idx = sb.index_of(query, source[perm])
+    found = idx >= 0
+    assert np.array_equal(source[perm][idx[found]], query[found])
+
+
+def test_index_of_returns_lowest_index_for_duplicate_source_rows():
+    source = np.array([[1, 1, 1], [0, 0, 0], [1, 1, 1]], dtype=np.int64)
+    query = np.array([[1, 1, 1], [0, 0, 0]], dtype=np.int64)
+    assert list(sb.index_of(query, source)) == [0, 1]
+
+
+def test_index_of_preserves_query_row_order_and_duplicates():
+    source = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.int64)
+    query = np.array([[1, 0, 0], [9, 9, 9], [1, 0, 0]], dtype=np.int64)
+    assert list(sb.index_of(query, source)) == [1, -1, 1]
+
+
+def test_index_of_carries_values_through_a_growing_op():
+    """The use case it exists for: re-aligning per-voxel data after `dilate`."""
+    voxels = solid_cube(3)
+    values = np.arange(len(voxels), dtype=float)
+    grown = sb.dilate(voxels)
+
+    src = sb.index_of(grown, voxels)
+    carried = np.where(src >= 0, values[src], -1.0)
+
+    kept = sb.isin(grown, voxels)
+    assert (carried[~kept] == -1.0).all(), "new voxels must take the fill value"
+    # Every original voxel keeps its own value, wherever it landed in the output.
+    back = sb.index_of(voxels, grown)
+    assert np.array_equal(carried[back], values)
+
+
+def test_index_of_on_far_apart_and_negative_clouds():
+    a = np.array([[-5, -5, -5], [100000, 5, 7]], dtype=np.int64)
+    b = np.array([[100000, 5, 7], [-5, -5, -5]], dtype=np.int64)
+    assert list(sb.index_of(a, b)) == [1, 0]
+
+
 def test_set_ops_dedup_their_inputs():
     dup = np.array([[0, 0, 0], [0, 0, 0], [1, 1, 1]], dtype=np.int64)
     assert len(sb.union(dup, dup)) == 2
@@ -233,6 +309,14 @@ def test_set_ops_on_empty():
     assert _as_set(sb.difference(a, EMPTY)) == _as_set(a)
     assert len(sb.difference(EMPTY, a)) == 0
     assert len(sb.isin(EMPTY, a)) == 0
+
+
+def test_index_of_on_empty():
+    a = np.array([[1, 2, 3]], dtype=np.int64)
+    assert len(sb.index_of(EMPTY, a)) == 0
+    assert sb.index_of(EMPTY, a).dtype == np.int64
+    assert list(sb.index_of(a, EMPTY)) == [-1]
+    assert len(sb.index_of(EMPTY, EMPTY)) == 0
 
 
 @pytest.mark.parametrize("dtype", [np.int16, np.int32, np.int64, np.uint32])
