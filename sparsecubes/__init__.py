@@ -1,5 +1,5 @@
 
-from . import binary, measure
+from . import binary, filters, measure
 from .core import (
     mesh,
     surface_nets,
@@ -19,11 +19,14 @@ from .__version__ import __version__
 # The top level carries the end-to-end pipelines, plus the operations that change
 # what the voxel set *is* rather than which voxels are in it - `edges` (voxels ->
 # graph) and `downsample`/`downsample_graph` (voxels -> a coarser lattice). The
-# primitives that stay on one lattice live in the two submodules:
+# primitives that stay on one lattice live in the submodules, split by what they
+# return:
 #   sparsecubes.binary  - voxel set(s) -> voxel set (morphology, set algebra)
 #   sparsecubes.measure - voxel set -> numbers / labels
+#   sparsecubes.filters - (voxels, values) -> (voxels, values) (value domain)
 __all__ = [
     "binary",
+    "filters",
     "measure",
     "mesh",
     "surface_nets",

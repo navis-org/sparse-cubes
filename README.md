@@ -28,6 +28,9 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
   components and measurements, in `sparsecubes.binary` and `sparsecubes.measure`.
 - **Adjacency & downsampling** - the voxel graph as an explicit edge list, and
   pooling onto a coarser lattice (optionally connectivity-safe).
+- **Filtering** - Gaussian smoothing, arbitrary kernels and grayscale
+  morphology over sparse voxels, exact to `scipy.ndimage` but without the dense
+  grid.
 - **Sparse-array interop** - every voxel-taking function also accepts a 3-D
   `scipy.sparse.coo_array` and hands one back where that makes sense.
 
@@ -309,14 +312,15 @@ markedly faster than the pure-`scipy` `csgraph` fallback. It is **optional but h
 recommended** - `sparse-cubes` falls back to scipy without it. It ships with the
 `skeleton` extra, or install it on its own with `pip install sparse-cubes[recommended]`.
 
-## Primitives: `binary` and `measure`
+## Primitives: `binary`, `measure` and `filters`
 
 The top level carries the end-to-end pipelines (`mesh`, `voxelize`,
-`*_skeletonize`). The primitives they are built from live in two submodules, split
-by what they return:
+`*_skeletonize`). The primitives they are built from live in three submodules,
+split by what they return:
 
 - **`sparsecubes.binary`** - voxel set(s) in, voxel set out.
 - **`sparsecubes.measure`** - voxel set in, numbers or labels out.
+- **`sparsecubes.filters`** - voxels *and values* in, voxels and values out.
 
 | `sc.binary` | | `sc.measure` | |
 | --- | --- | --- | --- |
@@ -372,6 +376,89 @@ returns the row index in the source or `-1`:
 >>> src = sc.binary.index_of(grown, voxels)      # -1 for the newly added voxels
 >>> grown_values = np.where(src >= 0, values[src], fill)
 ```
+
+### Filtering
+
+`filters` is the value domain: voxels **and values** in, voxels and values out.
+Every function is *exactly* its `scipy.ndimage` counterpart with
+`mode="constant", cval=0` - same kernels, same rounding, same zero-outside
+boundary - just without allocating the volume. The test suite pins them together
+to floating-point round-off.
+
+| | |
+| --- | --- |
+| `smooth` | truncated Gaussian (`gaussian_filter`) |
+| `correlate` | any kernel, separable or 3-D (`correlate`) |
+| `maximum` / `minimum` | grayscale morphology (`maximum_filter` / `minimum_filter`) |
+
+```python
+>>> vox, val = sc.filters.smooth(voxels, values=intensity, sigma=1.5)
+>>> vox, val = sc.filters.smooth(voxels, sigma=1.5)     # binary mask -> blurred field
+>>> blurred = vox[val > 0.5]                            # threshold back to a voxel set
+```
+
+`sigma` is **in voxels** (scalar or length-3; use `sigma / spacing` for physical
+units). Values default to an indicator function, which is what filtering a mask
+means, and always come back as floats - a weighted average does not stay integral.
+
+`correlate` is the general primitive the others are built on. Pass three 1-D
+kernels to apply them along x, y and z in turn - always do this when the filter
+separates, since it costs `sum(len(k))` taps instead of their product - or a
+single 3-D array for the non-separable case:
+
+```python
+>>> k = np.full(5, 1/5)
+>>> vox, val = sc.filters.correlate(voxels, [k, k, k], values=v)      # box blur
+>>> vox, val = sc.filters.correlate(voxels, np.ones((3,3,3))/27, values=v)
+```
+
+It is a *correlation* (`out[m] = Σ w[j]·in[m+j]`), matching `scipy.ndimage`; for
+`convolve` semantics reverse the kernel first. That distinction is invisible for
+symmetric kernels and a sign flip for antisymmetric ones, so it matters as soon
+as you build a derivative filter.
+
+`maximum` and `minimum` are `binary.dilate`/`erode` generalised from sets to
+values - use them when the voxels carry intensities rather than mere membership.
+
+Two conventions are worth knowing. **Absent means zero**, exactly as the sparse
+interop already treats a stored zero, so a voxel whose value is `0.0` is dropped
+on the way in and never produced on the way out. And a window reaching outside
+the set picks up that implicit zero - which is why `minimum` on a non-negative
+field yields precisely the box erosion.
+
+**Read this before reaching for them.** Unlike everything else in the library,
+sparse is not automatically the right answer here, because *most of these grow
+the voxel set* - by the kernel radius (`r = int(truncate * sigma + 0.5)` for a
+Gaussian) along each axis. `minimum` is the exception: it can only shrink the
+support, so it stays sparse at any radius. For the rest, cost is driven by the
+grown support, not by the input, and the rule that predicts it is:
+
+> sparse wins while `M · log M` stays below the bounding-box volume `V`, where
+> `M` is the **grown** support.
+
+Measured on a real neuron (`benchmarks/bench_smooth.py`, which sweeps sigma
+against occupancy for both scattered and neurite-like clouds):
+
+| case | bounding box | sigma | sparse | dense | verdict |
+|---|---|---|---|---|---|
+| neuron, 39.5k voxels | 29M cells (237 MB) | 0.5 | 0.05s | 0.23s | **4.9x faster** |
+| " | " | 1.0 | 0.10s | 0.40s | **3.9x faster** |
+| " | " | 2.0 | 0.30s | 0.50s | **1.7x faster** |
+| " | " | 4.0 | 1.58s | 0.74s | dense wins |
+| neuron, 5.56M voxels | 14.8B cells (**110 GB**) | 0.5 | 3.4s | — | **only option** |
+| uniform noise, 64³ box | 262k cells (2 MB) | any | — | ~4ms | dense wins throughout |
+
+So: use it when the bounding box is large and the object is thin - which is the
+case `sparse-cubes` exists for, and where the dense grid may not fit in memory at
+all. When the volume comfortably fits, `scipy.ndimage` is C-optimised and
+memory-bandwidth-bound while this is sort-bound, and it will win; there is no
+shame in densifying a small box.
+
+Two levers bound the cost: lower `truncate` (the support grows as
+`(2·truncate·sigma + 1)³`), or set `epsilon` to prune the Gaussian's negligible
+tail after each pass. Pruning at `1e-4` of the peak drops ~40% of the support for
+a worst-case error of the same order, at the price of exactness - the values no
+longer sum to the input's total.
 
 ## Adjacency and downsampling
 
