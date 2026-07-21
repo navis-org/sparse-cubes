@@ -25,12 +25,33 @@ from scipy import sparse as spx  # noqa: E402
 from _shapes import solid_cube, l_shape, y_branch, solid_cylinder  # noqa: E402
 
 
+def _scipy_does_nd():
+    """Can this scipy build a 3-D sparse array at all?
+
+    n-D `coo_array` arrived in scipy 1.15, which needs Python >= 3.10; on 3.9 the
+    newest scipy is 1.13, where `coo_array` is 1-/2-D only. There the interop is
+    simply unreachable - no 3-D sparse array can be constructed to hand us - so
+    the tests that need one skip rather than fail. Feature-detected, not version-
+    gated, so this stays right whichever way scipy moves.
+    """
+    try:
+        spx.coo_array((np.ones(1, bool), ((0,), (0,), (0,))), shape=(1, 1, 1))
+    except Exception:
+        return False
+    return True
+
+
+_HAS_ND_SPARSE = _scipy_does_nd()
+
+
 def _as_set(a):
     return set(map(tuple, np.asarray(a).tolist()))
 
 
 def _coo(voxels, shape=None, dtype=bool):
     """Build a 3-D coo_array holding `voxels` (which must be non-negative)."""
+    if not _HAS_ND_SPARSE:
+        pytest.skip("scipy is too old for 3-D sparse arrays (needs >= 1.15)")
     voxels = np.asarray(voxels)
     if shape is None:
         shape = tuple(int(v) + 1 for v in voxels.max(axis=0))
@@ -92,9 +113,8 @@ def test_to_voxels_round_trip(name):
 def test_to_voxels_drops_explicit_zeros():
     """Occupancy follows values, not the storage pattern."""
     coords = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.int64)
-    coo = spx.coo_array(
-        (np.array([1.0, 0.0]), tuple(coords[:, i] for i in range(3))), shape=(2, 2, 2)
-    )
+    coo = _coo(coords, shape=(2, 2, 2))
+    coo.data = np.array([1.0, 0.0])
     assert _as_set(to_voxels(coo)) == {(0, 0, 0)}
 
 

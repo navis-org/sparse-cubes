@@ -378,7 +378,9 @@ Three things worth knowing:
   overhead on the ordinary ndarray path is about 1.5 µs per call.
 - **3-D COO only.** scipy supports 3-D in the COO format alone (CSR/DOK/LIL are
   still 2-D as of scipy 1.15). Passing a 2-D matrix raises - it cannot represent
-  a volume.
+  a volume. Note that n-D `coo_array` itself needs scipy >= 1.15, i.e. Python
+  >= 3.10; on 3.9 there is no 3-D sparse array to pass in the first place. The
+  rest of `sparse-cubes` is unaffected.
 - **The shape is a floor, not a clamp.** An operation that grows the object past
   the array's bounds widens the shape to fit rather than truncating, so no voxel
   is ever silently dropped. The exception is growth *below* index 0, which a
