@@ -11,6 +11,7 @@ from .core import (
 from .voxelization import voxelize
 from .skeleton import thin_skeletonize, centerline, Skeleton
 from .teasar import teasar_skeletonize
+from .wavefront import wavefront_skeletonize
 from .downsample import downsample, downsample_graph
 from .graph import edges
 from .__version__ import __version__
@@ -34,6 +35,7 @@ __all__ = [
     "thin_skeletonize",
     "centerline",
     "teasar_skeletonize",
+    "wavefront_skeletonize",
     "edges",
     "downsample",
     "downsample_graph",

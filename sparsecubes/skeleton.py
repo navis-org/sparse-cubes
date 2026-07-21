@@ -36,18 +36,37 @@ class Skeleton:
     radii :     (M,) float or None. Optional per-node radius estimate.
     spacing :   (3,) or None. Physical voxel spacing, applied by `vertices` and
                 the converters (topology is always computed in index space).
+    n_voxels :  (M,) int or None. How many object voxels collapsed onto each
+                node. Only `wavefront_skeletonize` sets this: its rings *partition*
+                the voxel set, so the counts sum to the object's voxel count (less
+                anything `min_branch_length` pruned away). The other backends pick
+                skeleton nodes *from* the voxels rather than assigning every voxel
+                to one, so there is no meaningful count to report and it is None.
     """
 
     nodes: np.ndarray
     edges: np.ndarray
     radii: "np.ndarray | None" = None
     spacing: "np.ndarray | None" = None
+    n_voxels: "np.ndarray | None" = None
 
     @property
     def vertices(self):
         """Node coordinates as float, scaled by `spacing` when set."""
         v = self.nodes.astype(float)
         return v * self.spacing if self.spacing is not None else v
+
+    @property
+    def volume(self):
+        """Per-node occupied volume, or None when `n_voxels` is unset.
+
+        `n_voxels` times the volume of one cell, matching `measure.volume`'s
+        convention - a plain voxel count when `spacing` is None.
+        """
+        if self.n_voxels is None:
+            return None
+        cell = float(np.prod(self.spacing)) if self.spacing is not None else 1.0
+        return self.n_voxels.astype(float) * cell
 
     def node_degrees(self):
         """Degree of every node (1=end, 2=path, >=3=branch)."""
@@ -192,15 +211,20 @@ def _reduce_edges(nodes, edges):
     return edges[keep]
 
 
-def _prune_spurs(nodes, edges, min_len, spacing):
+def _prune_spurs(nodes, edges, min_len, spacing, return_index=False):
     """Remove terminal branches (end -> junction) shorter than `min_len`.
 
     Length is the summed segment length along the branch, in physical units when
     `spacing` is given. Iterates until stable (removing a spur can shorten the
     junction to degree 2 and expose another).
+
+    `return_index` additionally returns the surviving nodes' indices into the
+    original `nodes`, so callers can carry per-node payload (radii) across the
+    prune without matching coordinates back up.
     """
+    survivors = np.arange(len(nodes))
     if min_len <= 0 or len(edges) == 0:
-        return nodes, edges
+        return (nodes, edges, survivors) if return_index else (nodes, edges)
 
     changed = True
     while changed:
@@ -246,8 +270,9 @@ def _prune_spurs(nodes, edges, min_len, spacing):
             edge_keep = keep[edges[:, 0]] & keep[edges[:, 1]]
             nodes = nodes[keep]
             edges = remap[edges[edge_keep]]
+            survivors = survivors[keep]
 
-    return nodes, edges
+    return (nodes, edges, survivors) if return_index else (nodes, edges)
 
 
 def _radii(nodes, object_voxels, spacing):
