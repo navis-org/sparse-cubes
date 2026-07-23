@@ -53,18 +53,18 @@ dependencies = [
 # >=0.1.1 for `connected_components(group=)` and `label_adjacency`, which let
 # wavefront_skeletonize skip building an explicit edge list (~3x less memory).
 # 0.1.0 still works everywhere; it just takes the scipy path in wavefront.
-recommended = ["dijkstra3d-sparse>=0.1.1"]
+recommended = ["dijkstra3d-sparse>=0.2.1"]
 # scipy: per-node radii (cKDTree) and faster graph routines. Also pulls in the
 # recommended dijkstra3d-sparse accelerator so skeletonization is fast out of the box.
-skeleton = ["scipy", "dijkstra3d-sparse>=0.1.1"]
+skeleton = ["scipy", "dijkstra3d-sparse>=0.2.1"]
 # networkx: Skeleton.to_networkx()
 graph = ["networkx"]
 # everything, including the recommended accelerator
-all = ["scipy", "networkx", "dijkstra3d-sparse>=0.1.1"]
+all = ["scipy", "networkx", "dijkstra3d-sparse>=0.2.1"]
 # everything needed to run the test suite (incl. skimage cross-checks and the
 # dijkstra3d-sparse accelerator so its code path is exercised)
-test = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse>=0.1.1"]
-dev = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse>=0.1.1"]
+test = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse>=0.2.1"]
+dev = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse>=0.2.1"]
 
 [project.urls]
 Homepage = "https://github.com/navis-org/sparse-cubes"

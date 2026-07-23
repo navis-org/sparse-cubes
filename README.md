@@ -43,7 +43,7 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
 Install latest version from PyPI:
 
 ```bash
-pip3 install sparse-cubes -U
+pip3 install sparse-cubes[recommended] -U
 ```
 
 To install the developer version from Github:
@@ -57,7 +57,7 @@ present. Optional extras:
 
 - `pip install sparse-cubes[recommended]` - the
   [`dijkstra3d-sparse`](https://pypi.org/project/dijkstra3d-sparse/) accelerator,
-  which considerably speeds up `teasar_skeletonize`.
+  which considerably speeds up various operations
 - `pip install sparse-cubes[skeleton]` - scipy (for `teasar_skeletonize` and
   `radii=True`) plus the recommended `dijkstra3d-sparse` accelerator.
 - `pip install sparse-cubes[graph]` - networkx (for `to_networkx`).

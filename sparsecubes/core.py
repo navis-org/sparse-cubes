@@ -12,6 +12,20 @@ INT_DTYPES = (np.int64, np.int32, np.int16, np.uint64, np.uint32, np.uint16)
 
 from ._sparse import sparse_aware
 
+# `find_surface_voxels` extracts the object's exposed faces with one native pass
+# over the coordinates - `dijkstra3d_sparse.exposed_faces`, a per-voxel 6-bit mask
+# built off a transient spatial index - instead of three lexsorts over the whole
+# voxel array. The index is built and freed inside that call, so nothing persists
+# into the later mesh stages. Needs dijkstra3d_sparse >= 0.2.1; a missing or older
+# install falls back to the sort-based path, which stays dependency-free.
+try:
+    import dijkstra3d_sparse as _d3s
+
+    _HAVE_EXPOSED_FACES = hasattr(_d3s, "exposed_faces")
+except ImportError:
+    _d3s = None
+    _HAVE_EXPOSED_FACES = False
+
 
 # The original Trimesh automatically casts vertices to float64. Realistically,
 # our meshes should be fine with uint32 most of the time so we will avoid the
@@ -281,6 +295,17 @@ def argsort_cols(a, order=[0, 1, 2]):
 def find_surface_voxels(voxels):
     """Find surface voxels.
 
+    Returns the six directional sets of voxels with an exposed face - one per
+    face direction, in the order ``(left, right, back, front, bot, top)``. A
+    voxel is in a set when its neighbour one step along that direction is absent
+    from the object.
+
+    Uses the native `exposed_faces` probe (`_surface_voxels_probe`) when
+    `dijkstra3d_sparse` is available, otherwise the sort-based fallback
+    (`_surface_voxels_sorted`). The two return set-identical results; only the
+    order of voxels within each set differs, which nothing downstream depends on
+    (each exposed face is meshed independently, and `boundary_shell` deduplicates).
+
     Parameters
     ----------
     voxels :    (N, 3) numpy arraay
@@ -295,6 +320,41 @@ def find_surface_voxels(voxels):
      voxels_top)
 
     """
+    if _HAVE_EXPOSED_FACES and len(voxels):
+        try:
+            return _surface_voxels_probe(voxels)
+        except ValueError:
+            # `exposed_faces` rejects duplicate coordinates, which the sort-based
+            # path tolerates; fall back so meshing a set with repeats keeps
+            # working exactly as before. The probe is only ever an accelerator.
+            return _surface_voxels_sorted(voxels)
+    return _surface_voxels_sorted(voxels)
+
+
+# Bit index in `dijkstra3d_sparse.exposed_faces`' per-voxel mask for each of the
+# six returned sets, in tuple order (left, right, back, front, bot, top). The
+# mask's bit k is set when the neighbour at FACE_OFFSET[k] is absent; its offset
+# order (+x, -x, +y, -y, +z, -z) matches this module's `_FACE_KEY_DELTA`.
+_SURFACE_FACE_BITS = (1, 0, 4, 5, 3, 2)  # -x, +x, +z, -z, -y, +y
+
+
+def _surface_voxels_probe(voxels):
+    """Exposed-face sets from `dijkstra3d_sparse.exposed_faces`.
+
+    One native pass answers all six face directions per voxel as a 6-bit mask,
+    off a spatial index that is built and freed inside that call (so nothing
+    persists into the later mesh stages); splitting the mask into the six
+    directional sets is six cheap boolean gathers. Replaces the three
+    O(N log N) lexsorts of `_surface_voxels_sorted`. See the module note by
+    `_HAVE_EXPOSED_FACES`.
+    """
+    mask = _d3s.exposed_faces(voxels)
+    # Indexing back into `voxels` keeps the input integer dtype.
+    return tuple(voxels[(mask & (1 << bit)) != 0] for bit in _SURFACE_FACE_BITS)
+
+
+def _surface_voxels_sorted(voxels):
+    """Sort-based fallback for `find_surface_voxels` (no `dijkstra3d_sparse`)."""
     # Get surface voxels from back to front
     voxels = sort_cols(voxels, order=[0, 1, 2])
     is_front = np.ones(len(voxels), dtype=bool)
@@ -1079,9 +1139,31 @@ def make_surface_nets(
     # coordinate non-negative (stencil corners can reach one below the minimum).
     shift = flat_cells.min(axis=0)
     keys = pack(flat_cells - shift)
-    cell_keys = np.unique(keys)              # sorted unique cell keys
-    n_cells = len(cell_keys)
-    vidx = np.searchsorted(cell_keys, keys)  # (E*4,) vertex index per incidence
+    # `cells`/`flat_cells` are the biggest arrays here (~E*4*3 int64) and are done
+    # once `keys` exists; free them so the dedup below reuses their footprint
+    # rather than adding to the peak.
+    del cells, flat_cells
+    # Label each incidence by its cell's first appearance in sorted-key order -
+    # the same vertex index `np.unique(return_inverse=True)` assigns, but built by
+    # hand so each large temporary is freed the moment it is spent. That both
+    # avoids the ~E*4 cold binary searches of the old `unique` + `searchsorted`
+    # (the searches were 1.4 s of a 2.5 s call) and keeps fewer E*4 arrays live at
+    # once than `return_inverse` does, so the dedup peaks *below* the old path.
+    order = np.argsort(keys)
+    srt = keys[order]
+    del keys
+    is_new = np.empty(len(srt), dtype=bool)
+    is_new[0] = True
+    np.not_equal(srt[1:], srt[:-1], out=is_new[1:])  # run boundary = new cell
+    del srt
+    vidx = np.cumsum(is_new)          # 1..n_cells along the sorted order
+    n_cells = int(vidx[-1])
+    vidx -= 1
+    del is_new
+    labels = np.empty(len(vidx), dtype=np.int64)
+    labels[order] = vidx             # scatter labels back to incidence order
+    del order
+    vidx = labels
 
     # Vertex = mean of the midpoints of the cell's crossing edges. Accumulate the
     # x2-integer midpoints per cell (bincount is faster than np.add.at), then
