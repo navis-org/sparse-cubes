@@ -239,8 +239,11 @@ def test_simplify_ignored_on_smooth_path():
 @pytest.mark.skipif(not os.path.exists(DATA), reason="test voxel cloud not available")
 def test_greedy_no_perf_regression():
     # On a real (~40k voxel) cloud greedy meshing must (a) be lossless, (b) cut
-    # the triangle count substantially, and (c) stay cheap - within a small
-    # factor of the un-simplified blocky path (it is typically ~parity).
+    # the triangle count substantially, and (c) stay cheap. Bound is against the
+    # un-simplified blocky path: greedy runs a few x it because its two run-length
+    # lexsorts do not share the blocky path's now-native `factorize` dedup (which
+    # made blocky fast enough that "~parity" no longer holds). Generous factor to
+    # absorb CI variance.
     voxels = np.load(DATA)
 
     def best(simplify):
@@ -260,4 +263,4 @@ def test_greedy_no_perf_regression():
 
     assert greedy.area == pytest.approx(blocky.area)                    # lossless
     assert greedy.faces.shape[0] < blocky.faces.shape[0] * 0.7          # real cut
-    assert greedy_t < blocky_t * 2                                      # still cheap
+    assert greedy_t < blocky_t * 5                                      # still cheap

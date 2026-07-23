@@ -43,28 +43,22 @@ classifiers = [
 dependencies = [
     "numpy",
     "trimesh",
+    # dijkstra3d-sparse is required. `mesh` runs its whole surface pass on it
+    # (`exposed_faces` + `factorize`), and teasar/wavefront skeletonization run
+    # Dijkstra and the graph operations straight over the voxel coordinates on it.
+    # >=0.2.2 for `exposed_faces` and `factorize` (used unconditionally by `mesh`).
+    "dijkstra3d-sparse>=0.2.2",
 ]
 
 [project.optional-dependencies]
-# dijkstra3d-sparse: optional but *highly recommended*. teasar_skeletonize
-# transparently uses it to run Dijkstra straight over the voxel coordinates,
-# which is markedly faster than the pure-scipy csgraph fallback. sparse-cubes
-# works without it (falls back to scipy), but installing it is strongly advised.
-# >=0.1.1 for `connected_components(group=)` and `label_adjacency`, which let
-# wavefront_skeletonize skip building an explicit edge list (~3x less memory).
-# 0.1.0 still works everywhere; it just takes the scipy path in wavefront.
-recommended = ["dijkstra3d-sparse>=0.2.1"]
-# scipy: per-node radii (cKDTree) and faster graph routines. Also pulls in the
-# recommended dijkstra3d-sparse accelerator so skeletonization is fast out of the box.
-skeleton = ["scipy", "dijkstra3d-sparse>=0.2.1"]
+# scipy: per-node radii (cKDTree) and the csgraph routines for skeletonization.
+skeleton = ["scipy"]
 # networkx: Skeleton.to_networkx()
 graph = ["networkx"]
-# everything, including the recommended accelerator
-all = ["scipy", "networkx", "dijkstra3d-sparse>=0.2.1"]
-# everything needed to run the test suite (incl. skimage cross-checks and the
-# dijkstra3d-sparse accelerator so its code path is exercised)
-test = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse>=0.2.1"]
-dev = ["pytest", "scipy", "scikit-image", "networkx", "dijkstra3d-sparse>=0.2.1"]
+all = ["scipy", "networkx"]
+# everything needed to run the test suite (incl. skimage cross-checks)
+test = ["pytest", "scipy", "scikit-image", "networkx"]
+dev = ["pytest", "scipy", "scikit-image", "networkx"]
 
 [project.urls]
 Homepage = "https://github.com/navis-org/sparse-cubes"

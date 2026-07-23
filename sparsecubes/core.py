@@ -12,19 +12,10 @@ INT_DTYPES = (np.int64, np.int32, np.int16, np.uint64, np.uint32, np.uint16)
 
 from ._sparse import sparse_aware
 
-# `find_surface_voxels` extracts the object's exposed faces with one native pass
-# over the coordinates - `dijkstra3d_sparse.exposed_faces`, a per-voxel 6-bit mask
-# built off a transient spatial index - instead of three lexsorts over the whole
-# voxel array. The index is built and freed inside that call, so nothing persists
-# into the later mesh stages. Needs dijkstra3d_sparse >= 0.2.1; a missing or older
-# install falls back to the sort-based path, which stays dependency-free.
-try:
-    import dijkstra3d_sparse as _d3s
-
-    _HAVE_EXPOSED_FACES = hasattr(_d3s, "exposed_faces")
-except ImportError:
-    _d3s = None
-    _HAVE_EXPOSED_FACES = False
+# `dijkstra3d_sparse` (>= 0.2.2) is a required dependency: `mesh` runs its whole
+# surface pass on it - `exposed_faces` for surface extraction and `factorize` for
+# the vertex/cell dedup - both hashing the coordinates directly in one native pass.
+import dijkstra3d_sparse as _d3s
 
 
 # The original Trimesh automatically casts vertices to float64. Realistically,
@@ -99,18 +90,19 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify
                 the blocky path does not apply.
                 If False, each exposed voxel face instead becomes an
                 axis-aligned quad with corners on integer voxel coordinates -
-                i.e. a blocky mesh with 90 degree steps on diagonal surfaces.
-                This output is byte-identical to versions <= 0.2.0 and keeps
-                the input integer dtype.
+                i.e. a blocky mesh with 90 degree steps on diagonal surfaces,
+                keeping the input integer dtype. The geometry matches the
+                historical (<= 0.2.0) blocky mesh; the vertex/face *order* is no
+                longer stable across versions (the duplicate corners are now
+                collapsed in-house rather than by trimesh).
     simplify :  bool, optional
                 Only used on the blocky path (``smooth=False``). If True, merge
                 coplanar adjacent faces into maximal rectangles (greedy meshing).
                 This is lossless - the covered surface is unchanged - and
-                typically produces ~2x fewer triangles, which usually makes it
-                *faster* than the un-simplified blocky path (fewer vertices to
-                merge). See `greedy_faces`. Caveat: greedy meshing can introduce
-                T-junctions, so the result may be "less watertight" than the
-                per-face mesh. Ignored (with a warning) when ``smooth=True``.
+                typically produces ~2x fewer triangles. See `greedy_faces`.
+                Caveat: greedy meshing can introduce T-junctions, so the result
+                may be "less watertight" than the per-face mesh. Ignored (with a
+                warning) when ``smooth=True``.
 
     Returns
     -------
@@ -166,20 +158,14 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify
         )
     log("Done.", flush=True, verbose=verbose)
 
-    # Create mesh
+    # Create mesh. Every builder now returns an already-indexed mesh (one vertex
+    # per dual cell for smooth, deduplicated cube corners for blocky/greedy via
+    # `_dedup_vertices`), so no separate vertex-merge pass is needed.
     log("Making mesh... ", end="", flush=True, verbose=verbose)
     m = Trimesh(verts, faces, process=False)
     log("Done.", flush=True, verbose=verbose)
 
-    # Collapse vertices. The smooth path already emits one vertex per active
-    # dual cell (dedup comes for free via the cell -> vertex index map), so we
-    # only need to merge on the blocky path.
-    if not smooth:
-        log("Merging vertices... ", end="", flush=True, verbose=verbose)
-        tm.grouping.merge_vertices(m, digits_vertex=0, merge_tex=True, merge_norm=True)
-        log("Done.", flush=True, verbose=verbose)
-
-    # Apply spacing after we collapse duplicate vertices
+    # Apply spacing to the (already unique) vertices.
     if not isinstance(spacing, type(None)):
         m.vertices = m.vertices * spacing
 
@@ -300,11 +286,12 @@ def find_surface_voxels(voxels):
     voxel is in a set when its neighbour one step along that direction is absent
     from the object.
 
-    Uses the native `exposed_faces` probe (`_surface_voxels_probe`) when
-    `dijkstra3d_sparse` is available, otherwise the sort-based fallback
-    (`_surface_voxels_sorted`). The two return set-identical results; only the
-    order of voxels within each set differs, which nothing downstream depends on
-    (each exposed face is meshed independently, and `boundary_shell` deduplicates).
+    Uses the native `exposed_faces` probe (`_surface_voxels_probe`); the
+    sort-based `_surface_voxels_sorted` handles the two cases the probe cannot -
+    an empty set and inputs with duplicate coordinates (which `exposed_faces`
+    rejects). The two return set-identical results; only the order of voxels
+    within each set differs, which nothing downstream depends on (each exposed
+    face is meshed independently, and `boundary_shell` deduplicates).
 
     Parameters
     ----------
@@ -320,13 +307,12 @@ def find_surface_voxels(voxels):
      voxels_top)
 
     """
-    if _HAVE_EXPOSED_FACES and len(voxels):
+    if len(voxels):
         try:
             return _surface_voxels_probe(voxels)
         except ValueError:
-            # `exposed_faces` rejects duplicate coordinates, which the sort-based
-            # path tolerates; fall back so meshing a set with repeats keeps
-            # working exactly as before. The probe is only ever an accelerator.
+            # `exposed_faces` rejects duplicate coordinates; the sort path
+            # tolerates them, so meshing a set with repeats keeps working.
             return _surface_voxels_sorted(voxels)
     return _surface_voxels_sorted(voxels)
 
@@ -345,8 +331,7 @@ def _surface_voxels_probe(voxels):
     off a spatial index that is built and freed inside that call (so nothing
     persists into the later mesh stages); splitting the mask into the six
     directional sets is six cheap boolean gathers. Replaces the three
-    O(N log N) lexsorts of `_surface_voxels_sorted`. See the module note by
-    `_HAVE_EXPOSED_FACES`.
+    O(N log N) lexsorts of `_surface_voxels_sorted`.
     """
     mask = _d3s.exposed_faces(voxels)
     # Indexing back into `voxels` keeps the input integer dtype.
@@ -354,7 +339,7 @@ def _surface_voxels_probe(voxels):
 
 
 def _surface_voxels_sorted(voxels):
-    """Sort-based fallback for `find_surface_voxels` (no `dijkstra3d_sparse`)."""
+    """Sort-based `find_surface_voxels` for empty or duplicate-bearing input."""
     # Get surface voxels from back to front
     voxels = sort_cols(voxels, order=[0, 1, 2])
     is_front = np.ones(len(voxels), dtype=bool)
@@ -752,6 +737,25 @@ def surface_voxel_mask(voxels):
     )
 
 
+def _dedup_vertices(verts, faces):
+    """Collapse duplicate integer vertices and remap `faces` onto the unique set.
+
+    The blocky and greedy builders emit four corners per quad, so every shared
+    cube corner is repeated (12 M rows -> 3 M on the neuron). `factorize` hashes
+    the integer corners in one pass, returning a label per corner (`inv`) and the
+    first-occurrence row of each label (`reps`); `verts[reps]` is the distinct
+    vertex set, `inv[faces]` remaps the faces onto it. This is the same dedup
+    `make_surface_nets` runs on its dual cells - it lets `mesh` return an
+    already-indexed mesh instead of leaning on trimesh's general-purpose
+    `merge_vertices` (faster, and without the copies that set the blocky peak).
+    Vertices keep their integer input dtype.
+    """
+    if len(verts) == 0:
+        return verts, faces
+    _, inv, reps = _d3s.factorize(verts, return_index=True)
+    return verts[reps], inv[faces]
+
+
 def make_culled_faces(
     voxels_left, voxels_right, voxels_back, voxels_front, voxels_bot, voxels_top
 ):
@@ -855,7 +859,9 @@ def make_culled_faces(
     verts = np.vstack(verts)
     faces = np.vstack(faces)
 
-    return verts, faces
+    # Collapse the four-per-face duplicate corners into a proper indexed mesh, as
+    # `make_surface_nets` already does, so `mesh` needs no separate merge pass.
+    return _dedup_vertices(verts, faces)
 
 
 # Per-direction geometry for greedy meshing, indexed by dir_id in the order
@@ -1010,7 +1016,9 @@ def make_greedy_faces(
     single_face = np.where(_GREEDY_TRI_CCW[r_d][:, None, None], _FACE_CCW, _FACE_CW)
     faces = (single_face + (rows * 4)[:, None, None]).reshape(-1, 3)
 
-    return verts.astype(orig_dtype, copy=False), faces
+    # Adjacent rectangles share corners, so dedup into an indexed mesh (keeping the
+    # integer dtype) rather than leaving it to trimesh's merge in `mesh`.
+    return _dedup_vertices(verts.astype(orig_dtype, copy=False), faces)
 
 
 # Ordered lower-corner offsets of the 4 dual cells that share a surface-crossing
@@ -1135,35 +1143,11 @@ def make_surface_nets(
     cells = P[:, None, :] + _CELL_OFFSETS[axis]  # (E, 4, 3)
     flat_cells = cells.reshape(-1, 3)            # (E*4, 3)
 
-    # Dedup cells -> vertex index via an exact integer key. Shift to keep every
-    # coordinate non-negative (stencil corners can reach one below the minimum).
-    shift = flat_cells.min(axis=0)
-    keys = pack(flat_cells - shift)
-    # `cells`/`flat_cells` are the biggest arrays here (~E*4*3 int64) and are done
-    # once `keys` exists; free them so the dedup below reuses their footprint
-    # rather than adding to the peak.
+    # Dedup cells -> vertex index. `factorize` hashes the (possibly negative) cell
+    # coordinates directly - no shift, no pack, no sort - giving a dense label per
+    # incidence (`vidx`) and the distinct-cell count.
+    n_cells, vidx = _d3s.factorize(flat_cells)
     del cells, flat_cells
-    # Label each incidence by its cell's first appearance in sorted-key order -
-    # the same vertex index `np.unique(return_inverse=True)` assigns, but built by
-    # hand so each large temporary is freed the moment it is spent. That both
-    # avoids the ~E*4 cold binary searches of the old `unique` + `searchsorted`
-    # (the searches were 1.4 s of a 2.5 s call) and keeps fewer E*4 arrays live at
-    # once than `return_inverse` does, so the dedup peaks *below* the old path.
-    order = np.argsort(keys)
-    srt = keys[order]
-    del keys
-    is_new = np.empty(len(srt), dtype=bool)
-    is_new[0] = True
-    np.not_equal(srt[1:], srt[:-1], out=is_new[1:])  # run boundary = new cell
-    del srt
-    vidx = np.cumsum(is_new)          # 1..n_cells along the sorted order
-    n_cells = int(vidx[-1])
-    vidx -= 1
-    del is_new
-    labels = np.empty(len(vidx), dtype=np.int64)
-    labels[order] = vidx             # scatter labels back to incidence order
-    del order
-    vidx = labels
 
     # Vertex = mean of the midpoints of the cell's crossing edges. Accumulate the
     # x2-integer midpoints per cell (bincount is faster than np.add.at), then

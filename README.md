@@ -43,7 +43,7 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
 Install latest version from PyPI:
 
 ```bash
-pip3 install sparse-cubes[recommended] -U
+pip3 install sparse-cubes -U
 ```
 
 To install the developer version from Github:
@@ -52,14 +52,13 @@ To install the developer version from Github:
 pip3 install git+https://github.com/navis-org/sparse-cubes.git
 ```
 
-The only required dependencies are `numpy` and `trimesh`. Will use `fastremap` if
+Required dependencies are `numpy`, `trimesh` and
+[`dijkstra3d-sparse`](https://pypi.org/project/dijkstra3d-sparse/) (the coordinate
+accelerator that `mesh` and the skeletonizers run on). Will use `fastremap` if
 present. Optional extras:
 
-- `pip install sparse-cubes[recommended]` - the
-  [`dijkstra3d-sparse`](https://pypi.org/project/dijkstra3d-sparse/) accelerator,
-  which considerably speeds up various operations
 - `pip install sparse-cubes[skeleton]` - scipy (for `teasar_skeletonize` and
-  `radii=True`) plus the recommended `dijkstra3d-sparse` accelerator.
+  `radii=True`).
 - `pip install sparse-cubes[graph]` - networkx (for `to_networkx`).
 
 ## Quickstart
@@ -306,11 +305,9 @@ pool, where the default would oversubscribe the CPUs:
 >>> skel = sc.teasar_skeletonize(voxels, workers=1)  # single-threaded
 ```
 
-`teasar_skeletonize` transparently uses [`dijkstra3d-sparse`](https://pypi.org/project/dijkstra3d-sparse/)
-when it is installed to run Dijkstra straight over the voxel coordinates, which is
-markedly faster than the pure-`scipy` `csgraph` fallback. It is **optional but highly
-recommended** - `sparse-cubes` falls back to scipy without it. It ships with the
-`skeleton` extra, or install it on its own with `pip install sparse-cubes[recommended]`.
+`teasar_skeletonize` uses [`dijkstra3d-sparse`](https://pypi.org/project/dijkstra3d-sparse/)
+(a required dependency) to run Dijkstra straight over the voxel coordinates, which is
+markedly faster than a `scipy` `csgraph` pass over an explicit edge list.
 
 ## Primitives: `binary`, `measure` and `filters`
 
