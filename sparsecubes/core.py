@@ -328,10 +328,14 @@ def _surface_voxels_probe(voxels):
     """Exposed-face sets from `dijkstra3d_sparse.exposed_faces`.
 
     One native pass answers all six face directions per voxel as a 6-bit mask,
-    off a spatial index that is built and freed inside that call (so nothing
-    persists into the later mesh stages); splitting the mask into the six
+    off a packed key array that is sorted, swept and freed inside that call (so
+    nothing persists into the later mesh stages); splitting the mask into the six
     directional sets is six cheap boolean gathers. Replaces the three
     O(N log N) lexsorts of `_surface_voxels_sorted`.
+
+    Boolean-mask indexing keeps each returned set in input-voxel order, so the
+    sets - and every mesh built from them - are unaffected by how the mask is
+    computed natively.
     """
     mask = _d3s.exposed_faces(voxels)
     # Indexing back into `voxels` keeps the input integer dtype.
@@ -1036,6 +1040,13 @@ _CELL_OFFSETS = np.array(
     dtype=np.int64,
 )
 
+# int32 twin of `_CELL_OFFSETS`. `factorize` hashes int32 coordinates, so the dual
+# cells are built in int32 directly and handed over without a conversion pass.
+_CELL_OFFSETS_I32 = _CELL_OFFSETS.astype(np.int32)
+
+_INT32_LO = int(np.iinfo(np.int32).min)
+_INT32_HI = int(np.iinfo(np.int32).max)
+
 
 def pack(xyz, bits=(21, 21, 21)):
     """Pack non-negative integer XYZ coordinates into a single int64 key.
@@ -1113,7 +1124,12 @@ def make_surface_nets(
         (voxels_front, 2, -1),  # -Z face of a voxel  -> p = v - e_z
     ]
 
-    p_list, axis_list, sign_list, mid2_list = [], [], [], []
+    # `specs` is already grouped by axis and sign, so the concatenated edge array
+    # falls into at most six contiguous single-(axis, sign) blocks. Recording the
+    # boundaries lets the per-edge `axis` and `sign` arrays be dropped entirely:
+    # every place they were needed is a block-uniform constant instead.
+    p_list, mid2_list, blocks = [], [], []
+    n_edges = 0
     for V, a, s in specs:
         if len(V) == 0:
             continue
@@ -1123,8 +1139,8 @@ def make_surface_nets(
         p_list.append(p)
         # Midpoint in x2 integer units: 2 * p + e (integer, exact).
         mid2_list.append(2 * p + e)
-        axis_list.append(np.full(len(V), a, dtype=np.int64))
-        sign_list.append(np.full(len(V), s, dtype=np.int64))
+        blocks.append((n_edges, n_edges + len(V), a, s < 0))
+        n_edges += len(V)
 
     if not p_list:
         return (
@@ -1134,43 +1150,79 @@ def make_surface_nets(
 
     P = np.vstack(p_list)          # (E, 3) lower point of each crossing edge
     mid2 = np.vstack(mid2_list)    # (E, 3) edge midpoint x2
-    axis = np.concatenate(axis_list)  # (E,)
-    sign = np.concatenate(sign_list)  # (E,)
-    n_edges = len(P)
+    del p_list, mid2_list
 
     # Expand each edge into its 4 sharing dual cells (lower corners), keeping the
     # CCW-for-+normal ordering so we can also use it for winding below.
-    cells = P[:, None, :] + _CELL_OFFSETS[axis]  # (E, 4, 3)
-    flat_cells = cells.reshape(-1, 3)            # (E*4, 3)
+    #
+    # Built in int32, the dtype `factorize` hashes: passing int64 would make it
+    # range-check and convert the full (E*4, 3) array. Checking `P` here does the
+    # same job over a quarter of the rows. The guard is load-bearing - the int64
+    # -> int32 assignment below wraps silently rather than raising, which would
+    # yield a wrong mesh with no error. `- 1` covers the cell offsets, which reach
+    # one voxel below `P`.
+    if int(P.min()) - 1 < _INT32_LO or int(P.max()) > _INT32_HI:
+        raise ValueError("voxel coordinates exceed the int32 range")
+
+    # One offset row per edge (`_CELL_OFFSETS[axis]`) would materialise an
+    # (E, 4, 3) gather just to be added to `P`. Per block the offset is a fixed
+    # (4, 3), so it broadcasts against a plain slice assignment instead.
+    cells = np.empty((n_edges, 4, 3), dtype=np.int32)
+    for start, stop, a, _ in blocks:
+        cells[start:stop] = P[start:stop, None, :]  # broadcast write, no temp
+        cells[start:stop] += _CELL_OFFSETS_I32[a]   # in-place add, no temp
 
     # Dedup cells -> vertex index. `factorize` hashes the (possibly negative) cell
     # coordinates directly - no shift, no pack, no sort - giving a dense label per
     # incidence (`vidx`) and the distinct-cell count.
-    n_cells, vidx = _d3s.factorize(flat_cells)
-    del cells, flat_cells
+    n_cells, vidx = _d3s.factorize(cells.reshape(-1, 3))
+    del cells
+
+    quad = vidx.reshape(n_edges, 4)
 
     # Vertex = mean of the midpoints of the cell's crossing edges. Accumulate the
     # x2-integer midpoints per cell (bincount is faster than np.add.at), then
     # divide by the count and scale by 0.5 to leave x2 units -> float verts.
-    mid2_rep = np.repeat(mid2, 4, axis=0)  # (E*4, 3) edge midpoint for each cell
+    #
+    # Scattering the four incidences of an edge separately avoids an
+    # `np.repeat(mid2, 4)` copy - four times the size of `mid2` and formerly the
+    # peak allocation of this stage. Splitting the accumulation this way is exact,
+    # not just close: the weights are small integers and each cell takes at most
+    # twelve of them, so every partial sum is well inside float64's exact-integer
+    # range and the result does not depend on summation order.
     counts = np.bincount(vidx, minlength=n_cells)
-    sums = np.stack(
-        [
-            np.bincount(vidx, weights=mid2_rep[:, k], minlength=n_cells)
-            for k in range(3)
-        ],
-        axis=1,
-    )
-    verts = sums / counts[:, None] * 0.5
+    # bincount coerces its weights to float64; casting each column once here beats
+    # letting it re-cast a strided int64 column on all twelve calls.
+    mid2f = [np.ascontiguousarray(mid2[:, k], dtype=np.float64) for k in range(3)]
+    del mid2
+    acc = [np.zeros(n_cells, dtype=np.float64) for _ in range(3)]
+    for j in range(4):
+        # `quad[:, j]` is a strided view; bincount would copy it internally anyway.
+        col = np.ascontiguousarray(quad[:, j])
+        for k in range(3):
+            acc[k] += np.bincount(col, weights=mid2f[k], minlength=n_cells)
+    verts = np.stack(acc, axis=1) / counts[:, None] * 0.5
+    del mid2f, acc
 
     # Faces: the 4 cells per edge in winding order (reversed for -normal), split
-    # into two triangles.
-    quad = vidx.reshape(n_edges, 4)
-    neg = sign < 0
-    quad[neg] = quad[neg][:, [0, 3, 2, 1]]
+    # into two triangles. Reversing a row is a swap of columns 1 and 3, and each
+    # block has a single sign, so the two columns are assembled by contiguous
+    # per-block copies - no boolean gather-scatter over the whole quad array, and
+    # no in-place mutation of `quad` (a view of `vidx`) as a side effect.
+    c1 = np.empty(n_edges, dtype=np.int64)
+    c3 = np.empty(n_edges, dtype=np.int64)
+    for start, stop, _, is_neg in blocks:
+        lo, hi = (3, 1) if is_neg else (1, 3)
+        c1[start:stop] = quad[start:stop, lo]
+        c3[start:stop] = quad[start:stop, hi]
+
     faces = np.empty((n_edges * 2, 3), dtype=np.int64)
-    faces[0::2] = quad[:, [0, 1, 2]]
-    faces[1::2] = quad[:, [0, 2, 3]]
+    faces[0::2, 0] = quad[:, 0]
+    faces[0::2, 1] = c1
+    faces[0::2, 2] = quad[:, 2]
+    faces[1::2, 0] = quad[:, 0]
+    faces[1::2, 1] = quad[:, 2]
+    faces[1::2, 2] = c3
 
     return verts, faces
 
