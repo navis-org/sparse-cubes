@@ -24,6 +24,9 @@ densify for `scikit-image` (marching cubes / thinning) or `kimimaro`.
   SWC / networkx / trimesh.
 - **TEASAR skeletons** - well-centered medial-axis skeletons with radii, a sparse
   reimplementation of [`kimimaro`](https://github.com/seung-lab/kimimaro).
+- **Parametric tubes** - per skeleton node, the cross-section profile `r(θ)` as a
+  truncated Fourier series: 64 bytes a node, two independent LOD axes, and
+  evaluable directly in a shader.
 - **Primitives** - morphology (dilate/erode/open/close), set algebra, connected
   components and measurements, in `sparsecubes.binary` and `sparsecubes.measure`.
 - **Adjacency & downsampling** - the voxel graph as an explicit edge list, and
@@ -309,6 +312,177 @@ pool, where the default would oversubscribe the CPUs:
 (a required dependency) to run Dijkstra straight over the voxel coordinates, which is
 markedly faster than a `scipy` `csgraph` pass over an explicit edge list.
 
+## Parametric tubes
+
+A skeleton plus one radius per node is a tube of circular cross-section. Real
+neurites are not circular, and a mesh that captures the difference costs
+`O(triangles)`. `tube_coefficients` stores the cross-section instead: per node, the
+profile `r(θ)` in the plane normal to the skeleton tangent, as a truncated Fourier
+series.
+
+```python
+>>> profile = sc.tube_coefficients(voxels, spacing=(16, 16, 16), K=4)
+>>> profile.a0        # (M,)     mean radius - this alone is a classic SWC tube
+>>> profile.mag       # (M, K)   m_1..m_K, the shape
+>>> profile.phase     # (M, K)   φ_1..φ_K
+>>> profile.residual  # (M,)     RMS error of having truncated at K, in nm
+>>> profile.flags     # (M,)     junction / non-star / escaped / ... per node
+```
+
+Each harmonic means something specific: `m_1` is the offset between the skeleton
+node and the cross-section's centroid - **nonzero is a diagnostic that the
+skeleton is not centred**, not shape; `m_2` is ellipticity, the first term
+carrying real geometry; `m_3`/`m_4` mild lobing; `m_k` for large `k` is surface
+roughness and segmentation noise.
+
+Magnitude and phase rather than `a_k`/`b_k` because the frame is only defined up
+to a rotation about the tangent, which mixes the two. **`mag` is
+frame-independent, so truncate on it and never on the Cartesian pair** (available
+via `coefficients()` for reconstruction).
+
+### What `K` buys
+
+A 5.56M-voxel arbor at 16 nm, default pipeline (73,671 TEASAR nodes), against the
+two things a tube replaces:
+
+- **the voxel cloud**, `(N, 3)` int32 - **66.7 MB**, the input as it arrives
+  (`core.pack`'s one-int64-per-voxel keys would be 44.5 MB, so read the ratios
+  below as a 1.5x band, not a point estimate);
+- **the mesh** of those same voxels, 2.99M vertices and 6.02M triangles -
+  **108 MB** as float32 positions plus uint32 indices (216 MB as `sc.mesh`
+  actually returns it, float64/int64).
+
+`residual` is `profile.residual` averaged over nodes, against a mean radius of
+76 nm:
+
+|  K | B/node |     MB | % of voxels | % of mesh | residual / ā₀ | residual (voxels) |
+|---:|-------:|-------:|------------:|----------:|--------------:|------------------:|
+|  0 |     32 |   2.36 |       3.5 % |     2.2 % |         0.403 |              1.92 |
+|  1 |     40 |   2.95 |       4.4 % |     2.7 % |         0.306 |              1.46 |
+|  2 |     48 |   3.54 |       5.3 % |     3.3 % |         0.213 |              1.02 |
+|  3 |     56 |   4.13 |       6.2 % |     3.8 % |         0.175 |              0.84 |
+|  **4** | **64** | **4.71** | **7.1 %** | **4.4 %** |     **0.147** |          **0.70** |
+|  6 |     80 |   5.89 |       8.8 % |     5.5 % |         0.118 |              0.56 |
+|  8 |     96 |   7.07 |      10.6 % |     6.5 % |         0.101 |              0.48 |
+| 12 |    128 |   9.43 |      14.1 % |     8.7 % |         0.079 |              0.37 |
+| 16 |    160 |  11.79 |      17.7 % |    10.9 % |         0.064 |              0.30 |
+
+At the default `K=4` that is **14x smaller than the voxel cloud** (9x against the
+packed form) **and 23x smaller than the mesh**. Note the mesh is 1.6x the cloud it
+was built from, so meshing is not a compression step - the tube is the only
+representation here that is smaller than its own input.
+
+`K=0` is a classic SWC tube - one radius a node, and 40% off. `m_2` alone (`K=2`)
+halves that for 3.3% of the mesh, the single best trade in the table, and it
+matches what the coefficients say: ellipticity is the one harmonic clearly above
+the noise.
+
+**After that there is no knee, so `K` is a budget decision rather than a natural
+cut.** How much of the remainder is real shape rather than rasterization is
+measurable - a *perfectly circular* voxelized cylinder has a residual too, and all
+of it is quantization:
+
+| circle radius | 5 vox | 8 vox | 16 vox |
+|---|---:|---:|---:|
+| residual / ā₀ at `K=4` | 0.056 | 0.042 | 0.016 |
+
+The neuron's mean radius is 4.8 voxels, so its floor is ~0.05 - and its `K=4`
+residual of 0.147 is about **three times** that. Harmonics past `m_2` are still
+buying real geometry here, not noise; the curve only approaches the floor near
+`K=16`. Two things argue against spending that anyway: the returns per byte are
+poor (10.9% of the mesh for 0.064), and the surface *normal* gets worse as `K`
+rises, for the reason below. `K=4` is the default as a compromise, not a knee -
+raise it if you are storing thick proximal dendrites, and note that a coarser
+skeleton is usually the better saving, since axial resampling and `K` are
+independent.
+
+Two independent LOD axes fall out: subsample nodes (axial) or lower `K`
+(angular). Neither materializes anything - `evaluate()` reads both as arguments:
+
+```python
+>>> profile.evaluate()                                  # full detail
+>>> profile.evaluate(n_theta=8, k=1, nodes=idx[::4])    # coarse, both axes
+>>> pts, normals = profile.evaluate(k=4, k_normal=1, return_normals=True)
+```
+
+`return_normals` gives the analytic surface normal — `cross(dp/dθ, dp/ds)`, with
+`dp/dθ` in closed form and `dp/ds` a centred difference of the surface at the same
+θ. Differencing the surface rather than reusing the stored tangent is what makes a
+bouton shade correctly: a taper tilts the surface even where the centreline is
+straight.
+
+**Truncate the normal harder than the surface.** `dr/dθ` weights harmonic `k` by
+`k`, so once the `m_k` flatten out at the rasterization floor, every further
+harmonic adds more slope than shape. Measured on a 16 nm arbor, the normal's
+median tilt away from radial is 24° at `k=1` and 35° at `k=4`, while the
+silhouette keeps improving — the surface really is that bumpy at a 5-voxel radius,
+so this is honest geometry, but it shades like sandpaper. `k_normal` decouples the
+two. The floor is ~13°, which is the axial term and is mostly real: smoothing `a0`
+three times along the branch only reaches 10°.
+
+`to_gpu_buffer()` emits one `(M, 8 + 2K)` float32 array in shader struct order —
+`[pos.xyz, quat.xyzw, a0, a_1..a_K, b_1..b_K]`, 16 floats, **64 bytes a node** at
+`K=4` — so a vertex-pulling shader can generate the surface from `vertex_index`
+alone, with the LOD as a uniform rather than a buffer swap. `evaluate()` is the
+CPU mirror of exactly that loop.
+
+Note it defaults to the **Cartesian** pair, not the magnitude/phase stored above:
+a shader walks `Σ a_k cos(kθ) + b_k sin(kθ)` upward by angle addition, so the
+whole series costs one `cos` and one `sin` for any `K`, and `dr/dθ` — the surface
+normal — falls out of the same loop. Magnitude/phase would need a `cos(φ_k)` per
+harmonic per vertex. Pass `form="polar"` if the consumer genuinely needs
+magnitudes on the GPU (to threshold or fade harmonics per node).
+
+Extraction runs off the voxel mask, not off a mesh: each node fires `n_theta`
+rays in its cross-section plane and takes the first exit, walked as an
+Amanatides-Woo DDA over the sparse voxel set. Exits are the exact parametric
+crossing of a cell face, so the radii are sub-voxel - finer than the
+nearest-voxel-centre estimate `measure.distance_transform` gives. Only the first
+exit is taken, so spurious handles and merge artifacts stop mattering.
+
+The walk itself goes to `dijkstra3d_sparse.Graph.ray_exits` when the installed
+version has it, and otherwise to a vectorised numpy DDA over a membership probe.
+On a 5.56M-voxel arbor (73,671 nodes, 4.7M rays) that is 0.93 s against 3.5 s for
+the numpy walk and 9.4 s with no `dijkstra3d-sparse` at all. All three are pinned
+bit-for-bit against each other in the tests; `backend=` forces one.
+
+Use `sc.measure.tube_profile(voxels, skeleton, ...)` to fit against a skeleton you
+already have.
+
+**Read the flags before trusting a node.** Two failure modes are intrinsic and
+both are reported rather than hidden:
+
+```python
+>>> profile.flag("junction")   # frames do not propagate through a bifurcation
+>>> profile.non_star           # (M,) fraction of this node's rays that re-entered
+```
+
+`r(θ)` can only represent a cross-section that is star-shaped about its skeleton
+point, which spines, self-touching neurites and somata are not. Pass
+`diagnostics=True` and each ray keeps going past its first exit to report whether
+it re-enters — measuring that failure rate directly, for about one extra pass.
+Somata are not tube-like at all and are best excluded upstream.
+
+How far a ray keeps looking is `star_window` (default 1.0, i.e. out to twice the
+local radius) and is deliberately **not** `max_radius`. Widen it and the rate
+climbs smoothly as rays start reaching unrelated neurites passing nearby — on the
+neuron fixture the same object reports anywhere from 31% to 69% of nodes non-star
+purely as a function of that window. That is a measurement of how densely the
+arbor is packed, not of whether any cross-section is star-shaped, so the two
+windows are kept separate.
+
+One more artifact worth knowing about: at anisotropic resolutions the radial
+quantization is direction-dependent (40 nm along z, 4 nm in-plane), so it aliases
+into specific `k` as a function of the neurite's direction. **The noise floor on
+`mag` is not flat**, and a truncation threshold should account for the local
+tangent (`frame_vectors()` returns it). `benchmarks/bench_tube.py` sweeps a tube
+of known geometry through a range of orientations to separate that artifact from
+real structure, and reports the spectrum, the per-`k` error budget and the
+star-shapedness rate alongside the timings.
+
+This is a **coarse-LOD** representation and is meant to be lossy - keep a real
+mesh at the finest level, where measurements are taken.
+
 ## Primitives: `binary`, `measure` and `filters`
 
 The top level carries the end-to-end pipelines (`mesh`, `voxelize`,
@@ -328,6 +502,7 @@ split by what they return:
 | `isin` / `index_of` | per-row membership / row lookup | `bounding_box` / `centroid` | index bounds / centre of mass |
 | `thin` / `fill_cavities` | topological thinning / void fill | `distance_transform` | exact sparse EDT |
 | | | `iou` / `dice` | set similarity of two clouds |
+| | | `tube_profile` | Fourier cross-sections along a skeleton |
 
 ```python
 >>> import sparsecubes as sc

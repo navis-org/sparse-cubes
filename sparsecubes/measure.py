@@ -25,6 +25,10 @@ from .core import _component_labels, boundary_shell, pack
 
 from ._sparse import sparse_aware
 
+# `tube_profile` measures a voxel set against a skeleton, so it belongs here by the
+# return-type rule, but it is large enough to warrant its own module.
+from .tube import tube_profile
+
 __all__ = [
     "connected_components",
     "largest_component",
@@ -36,6 +40,7 @@ __all__ = [
     "distance_transform",
     "iou",
     "dice",
+    "tube_profile",
 ]
 
 

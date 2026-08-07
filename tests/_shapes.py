@@ -58,6 +58,83 @@ def solid_cylinder(radius=4, length=20):
     return np.vstack(out).astype(np.int64)
 
 
+# The profile fixtures below all put their true axis at ``(PAD, PAD)`` in xy,
+# independent of their radii. The bounding-box centre will NOT do: a shape with odd
+# angular symmetry (3 or 5 lobes) has an asymmetric bbox, and seeding the skeleton
+# at its centre puts a real offset into the k=1 harmonic - which is exactly what
+# k=1 is for, and so would silently corrupt any test that used it.
+PAD = 16
+
+
+def _extrude(keep, xx, yy, length):
+    """Stack a boolean cross-section mask along +z into a solid cylinder."""
+    disk = np.stack([xx[keep] + PAD, yy[keep] + PAD], axis=1)
+    out = [np.column_stack([disk, np.full(len(disk), z)]) for z in range(length)]
+    return np.vstack(out).astype(np.int64)
+
+
+def _section_grid(reach):
+    """Symmetric integer meshgrid wide enough for a cross-section of `reach`."""
+    rng = np.arange(-int(np.ceil(reach)) - 1, int(np.ceil(reach)) + 2)
+    return np.meshgrid(rng, rng)
+
+
+def elliptic_cylinder(a=10, b=5, length=40, rot=0.0):
+    """A solid elliptic cylinder along +z, semi-axes `a`/`b`, rotated by `rot`.
+
+    An ellipse is the shape a tube profile should resolve almost entirely in the
+    ``k=2`` harmonic. `rot` (radians, about the cylinder's own axis) is there to
+    test that the stored magnitudes are frame-independent while the phases are not.
+    Axis at ``(PAD, PAD)``.
+    """
+    xx, yy = _section_grid(max(a, b))
+    c, s = np.cos(-rot), np.sin(-rot)
+    xr, yr = c * xx - s * yy, s * xx + c * yy
+    return _extrude((xr / float(a)) ** 2 + (yr / float(b)) ** 2 <= 1.0, xx, yy, length)
+
+
+def lobed_cylinder(radius=8, n_lobes=3, amp=1.5, length=40):
+    """A solid cylinder along +z with radius ``radius + amp*cos(n_lobes*theta)``.
+
+    Puts a known amount of energy in exactly one harmonic, ``k = n_lobes``, with
+    ``a0 = radius`` and ``m_k = amp``. That makes it an oracle for the angular
+    decomposition rather than just a smoke test. Axis at ``(PAD, PAD)``.
+    """
+    xx, yy = _section_grid(radius + abs(amp))
+    keep = np.hypot(xx, yy) <= radius + amp * np.cos(n_lobes * np.arctan2(yy, xx))
+    return _extrude(keep, xx, yy, length)
+
+
+def disc_cylinder(radius=8, length=40):
+    """A plain circular cylinder on the `lobed_cylinder` axis, i.e. at ``(PAD, PAD)``.
+
+    `solid_cylinder` cannot stand in: it centres on its own radius rather than on
+    `PAD`, and the tests that read a single ray direction depend on the axis being
+    at a known point. Spelling this as ``lobed_cylinder(n_lobes=4, amp=0.0)`` works
+    but reads as though the lobe count meant something.
+    """
+    return lobed_cylinder(radius=radius, n_lobes=1, amp=0.0, length=length)
+
+
+def axial_skeleton(voxels, centre=(PAD, PAD), spacing=None):
+    """The exact straight +z centerline of a cylinder fixture, as a `Skeleton`.
+
+    Using the known axis instead of a skeletonizer's output keeps the coefficient
+    tests measuring the *profile* rather than the skeletonizer: TEASAR roots a fat
+    cylinder at a cap corner, which drags its first nodes well off the axis - a
+    property of TEASAR, not of the extraction.
+    """
+    from sparsecubes.skeleton import Skeleton
+
+    lo, hi = int(voxels[:, 2].min()), int(voxels[:, 2].max())
+    n = hi - lo + 1
+    nodes = np.empty((n, 3), dtype=float)
+    nodes[:, 0], nodes[:, 1] = centre[0], centre[1]
+    nodes[:, 2] = np.arange(lo, hi + 1)
+    edges = np.stack([np.arange(n - 1), np.arange(1, n)], axis=1)
+    return Skeleton(nodes, edges, None, None if spacing is None else np.asarray(spacing))
+
+
 def annulus(outer=9, inner=5):
     """A flat ring (annulus) in the z=0 plane - a shape with one loop."""
     rng = np.arange(-outer, outer + 1)
