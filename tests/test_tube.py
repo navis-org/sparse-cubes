@@ -1043,15 +1043,26 @@ def test_empty_and_single_node():
 
 
 def test_sparse_array_input():
-    """The `sparse_aware` contract: a 3-D coo_array works wherever voxels do."""
+    """The `sparse_aware` contract: a 3-D coo_array works wherever voxels do.
+
+    n-D `coo_array` arrived in scipy 1.15, which needs Python >= 3.10; on 3.9 the
+    newest scipy is 1.13, where `coo_array` is 1-/2-D only and no 3-D array can be
+    built to hand us at all. Feature-detected rather than version-gated, matching
+    `test_sparse_interop`.
+    """
     sparse = pytest.importorskip("scipy.sparse")
+    try:
+        sparse.coo_array((np.ones(1, bool), ((0,), (0,), (0,))), shape=(1, 1, 1))
+    except Exception:
+        pytest.skip("scipy is too old for 3-D sparse arrays (needs >= 1.15)")
+
     vox = disc_cylinder(5, 12)
     skel = axial_skeleton(vox)
     dense = T.tube_profile(vox, skel, K=2, n_theta=32, max_radius=40)
 
     coo = sparse.coo_array(
         (np.ones(len(vox), np.uint8), tuple(vox[:, i] for i in range(3))),
-        shape=tuple(vox.max(axis=0) + 1),
+        shape=tuple(int(v) + 1 for v in vox.max(axis=0)),
     )
     np.testing.assert_array_equal(T.tube_profile(coo, skel, K=2, n_theta=32,
                                                 max_radius=40).a0, dense.a0)
