@@ -48,13 +48,6 @@ from .thinning import _validate
 
 try:
     import dijkstra3d_sparse as _dijkstra3d_sparse
-
-    # The edge-list-free path needs `connected_components(group=)` and
-    # `label_adjacency`, both new in dijkstra3d-sparse 0.1.1. Older versions are
-    # fine for the rest of the library, so degrade to scipy here rather than
-    # failing the import - `label_adjacency` is the marker for both.
-    if not hasattr(_dijkstra3d_sparse.Graph, "label_adjacency"):
-        _dijkstra3d_sparse = None
 except ImportError:
     _dijkstra3d_sparse = None
 

@@ -12,7 +12,7 @@ INT_DTYPES = (np.int64, np.int32, np.int16, np.uint64, np.uint32, np.uint16)
 
 from ._sparse import sparse_aware
 
-# `dijkstra3d_sparse` (>= 0.2.2) is a required dependency: `mesh` runs its whole
+# `dijkstra3d_sparse` (>= 0.3.0) is a required dependency: `mesh` runs its whole
 # surface pass on it - `exposed_faces` for surface extraction and `factorize` for
 # the vertex/cell dedup - both hashing the coordinates directly in one native pass.
 import dijkstra3d_sparse as _d3s
@@ -468,10 +468,7 @@ def _component_labels(keys_sorted, connectivity):
     available - the topology-safe fill genuinely needs a components routine.
     """
     try:  # accelerated path, straight off the coordinates
-        import dijkstra3d_sparse as _d3s
-
-        if hasattr(_d3s, "connected_components"):
-            return _d3s.connected_components(unpack(keys_sorted), connectivity=connectivity)
+        return _d3s.connected_components(unpack(keys_sorted), connectivity=connectivity)
     except Exception:  # pragma: no cover - fall back to scipy on any hiccup
         pass
     try:

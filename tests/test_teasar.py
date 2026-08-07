@@ -444,25 +444,6 @@ def test_incremental_grafting_is_a_valid_forest(name):
     assert np.all(sk.radii > 0)
 
 
-@pytest.mark.skipif(not _has_ds, reason="dijkstra3d_sparse not installed")
-@pytest.mark.parametrize("name", list(SHAPES))
-@pytest.mark.parametrize("branching", ["exact", "tree", "fast"])
-def test_reusable_graph_matches_free_functions(name, branching, monkeypatch):
-    # The reusable `Graph` handle (index built once) must give exactly the same
-    # skeleton as the free-function fallback (index rebuilt per call) - same code
-    # runs, only where the index is built moves. Skip if the installed build has
-    # no `Graph` (then both paths are already the fallback).
-    if not _teasar._HAS_GRAPH:
-        pytest.skip("installed dijkstra3d_sparse has no Graph handle")
-    shp = SHAPES[name]
-    sk_graph = sc.teasar_skeletonize(shp, branching=branching)   # Graph handle
-    monkeypatch.setattr(_teasar, "_HAS_GRAPH", False)            # force free-func path
-    sk_free = sc.teasar_skeletonize(shp, branching=branching)
-    assert np.array_equal(sk_graph.nodes, sk_free.nodes)
-    assert np.array_equal(sk_graph.edges, sk_free.edges)
-    assert np.array_equal(sk_graph.radii, sk_free.radii)
-
-
 def test_injected_graph_ignores_accelerator(monkeypatch):
     # An injected/downsampled graph is authoritative and its cells need not be
     # coordinate-26-adjacent, so the coordinate-derived accelerator must never

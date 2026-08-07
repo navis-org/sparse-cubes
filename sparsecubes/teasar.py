@@ -45,12 +45,6 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - fallback exercised when the lib is absent
     _dijkstra3d_sparse = None
 
-# `dijkstra3d_sparse.Graph` (added after the initial release) caches the
-# coordinate->row index once and reuses it across queries, so a component's many
-# Dijkstra/graft calls don't each rebuild the O(N) index. Guard on the attribute
-# so older library builds still work through the free functions.
-_HAS_GRAPH = _dijkstra3d_sparse is not None and hasattr(_dijkstra3d_sparse, "Graph")
-
 __all__ = ["teasar_skeletonize"]
 
 # Cost given to graph edges that lead into the already-built skeleton when
@@ -244,29 +238,6 @@ class _ScipyDijkstra:
         return dist, pred
 
 
-class _FreeFuncGraph:
-    """Fallback handle for `dijkstra3d_sparse` builds without `Graph`.
-
-    Binds the voxels and forwards to the free functions, which rebuild the
-    coordinate index on every call - so `_SparseDijkstra` can drive both this and
-    the real reusable `Graph` through one interface.
-    """
-
-    __slots__ = ("_vox",)
-
-    def __init__(self, vox):
-        self._vox = vox
-
-    def dijkstra_field(self, sources, **kw):
-        return _dijkstra3d_sparse.dijkstra_field(self._vox, sources, **kw)
-
-    def shortest_path_to_set(self, source, stop_mask, **kw):
-        return _dijkstra3d_sparse.shortest_path_to_set(self._vox, source, stop_mask, **kw)
-
-    def index_of(self, coords, **kw):
-        return _dijkstra3d_sparse.index_of(self._vox, coords, **kw)
-
-
 class _SparseDijkstra:
     """`dijkstra3d_sparse` backend: Dijkstra straight over the voxel coordinates.
 
@@ -288,11 +259,7 @@ class _SparseDijkstra:
         )
         self._pdrf_node = None
         # Build (and dedup-check) the coordinate index once; reuse for every query.
-        self._g = (
-            _dijkstra3d_sparse.Graph(vox, index_kind="hash")
-            if _HAS_GRAPH
-            else _FreeFuncGraph(vox)
-        )
+        self._g = _dijkstra3d_sparse.Graph(vox, index_kind="hash")
 
     def geom_dist(self, source):
         dist, _ = self._g.dijkstra_field(

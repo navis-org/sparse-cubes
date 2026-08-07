@@ -44,10 +44,13 @@ dependencies = [
     "numpy",
     "trimesh",
     # dijkstra3d-sparse is required. `mesh` runs its whole surface pass on it
-    # (`exposed_faces` + `factorize`), and teasar/wavefront skeletonization run
-    # Dijkstra and the graph operations straight over the voxel coordinates on it.
-    # >=0.2.2 for `exposed_faces` and `factorize` (used unconditionally by `mesh`).
-    "dijkstra3d-sparse>=0.2.2",
+    # (`exposed_faces` + `factorize`), teasar/wavefront skeletonization run
+    # Dijkstra and the graph operations straight over the voxel coordinates on it,
+    # and `tube_profile` casts its rays with it.
+    # >=0.3.0 for `ray_exits`; that floor also covers `exposed_faces`/`factorize`
+    # (0.2.2), `Graph` and `label_adjacency` (0.1.1), so every capability the
+    # library is used for is now guaranteed rather than probed for at import.
+    "dijkstra3d-sparse>=0.3.0",
 ]
 
 [project.optional-dependencies]
