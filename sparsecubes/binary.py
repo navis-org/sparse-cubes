@@ -14,9 +14,13 @@ Results are always deduplicated and returned in sorted (x, y, z) order, with the
 input's integer dtype preserved.
 """
 
+import itertools
+import warnings
+
 import numpy as np
 
 from ._keys import (
+    AXIS_STEPS,
     from_keys,
     key_deltas,
     sorted_hit,
@@ -24,6 +28,7 @@ from ._keys import (
     to_keys,
     to_row_keys,
     unique,
+    unique_sorted,
 )
 from ._sparse import sparse_aware
 from .core import fill_cavities
@@ -42,7 +47,35 @@ __all__ = [
     "index_of",
     "thin",
     "fill_cavities",
+    "make_manifold",
 ]
+
+# Voxel pairs that touch along an edge or at a corner but share no face. The 12
+# edge and 8 corner directions come in opposite pairs, and a pair describes the
+# same two voxels from either end, so fixing the first axis' step to +1 visits
+# every unordered pair exactly once: 6 edges, 4 corners.
+#
+# Each entry is ``(delta, first_step, between)`` - the direction to the far
+# voxel, the step to fill if the pair needs separating, and every cell strictly
+# between the two, which is every proper non-empty subset sum of the axis steps.
+def _contact_table():
+    axis = [s * AXIS_STEPS[a] for a in range(3) for s in (1, -1)]
+    combos = [(axis[0], axis[2 + s]) for s in (0, 1)]  # +x with +-y
+    combos += [(axis[0], axis[4 + s]) for s in (0, 1)]  # +x with +-z
+    combos += [(axis[2], axis[4 + s]) for s in (0, 1)]  # +y with +-z
+    combos += [(axis[0], axis[2 + sy], axis[4 + sz]) for sy in (0, 1) for sz in (0, 1)]
+    table = []
+    for steps in combos:
+        between = [
+            sum(c)
+            for r in range(1, len(steps))
+            for c in itertools.combinations(steps, r)
+        ]
+        table.append((sum(steps), steps[0], between))
+    return table
+
+
+_CONTACTS = _contact_table()
 
 
 def _dilate_keys(keys, deltas):
@@ -230,6 +263,112 @@ def symmetric_difference(voxels, other):
     out = np.concatenate([a[~sorted_hit(a, b)], b[~sorted_hit(b, a)]])
     out.sort()
     return from_keys(out, shift, dtype)
+
+
+def _contact_fixes(keys):
+    """Keys to add to break every edge-only and corner-only contact in `keys`.
+
+    Two voxels touching along an edge, with both of the cells that would share a
+    face with each of them empty, meet the surface at a single *edge* - four
+    quads hinge on it, so the mesh is non-manifold there and `is_watertight` is
+    False. Two voxels touching at a corner, with all six cells between them
+    empty, pinch the surface at a single vertex. Filling one of the in-between
+    cells removes the pinch; which one is arbitrary, so take the first axis'.
+
+    A corner contact is resolved to an edge contact rather than all the way, so
+    the caller has to iterate - see `make_manifold`.
+
+    The ten directions between them ask about the same neighbour offsets over and
+    over (all six faces, and eight of the edges, recur), so the membership tests
+    are memoized: every distinct offset costs exactly one pass, and the rest is
+    boolean algebra on the masks. That turns ~46 sorted lookups into 17.
+    """
+    probe, add = {}, []
+
+    def present(delta):
+        """Mask over `keys`: is the voxel `delta` away also in the set?"""
+        hit = probe.get(delta)
+        if hit is None:
+            hit = probe[delta] = sorted_hit(keys + delta, keys)
+        return hit
+
+    for delta, first, between in _CONTACTS:
+        sel = present(delta)
+        for gap in between:
+            if not sel.any():
+                break
+            sel = sel & ~present(gap)
+        if sel.any():
+            add.append(keys[sel] + first)
+    if not add:
+        return np.empty(0, dtype=np.int64)
+    return unique(np.concatenate(add))
+
+
+@sparse_aware(mirror=True)
+def make_manifold(voxels, max_iter=8):
+    """Add voxels until no two touch along an edge or at a corner alone.
+
+    Such a contact (see `_contact_fixes`) makes `sparsecubes.mesh`'s output
+    non-manifold - trimesh reports ``is_watertight == False`` for an edge contact
+    and a corrupted Euler number for a corner one - and downstream tools that
+    assume a manifold surface (boolean ops, smoothing, slicers) misbehave on
+    either. A clean solid contains none, so this is a no-op on one. They show up
+    when a voxel set is built from something *incomplete*, notably
+    `sparsecubes.voxelize` on a mesh with holes, where the columns it could not
+    close leave thin shell fragments that graze each other.
+
+    Filling a cell between the two offending voxels is the only repair
+    available - nothing can be *removed* to separate them without eating into
+    the object - so the set only grows, and never outside its bounding box.
+
+    Parameters
+    ----------
+    voxels :    (N, 3) integer array of XYZ voxel coordinates.
+    max_iter :  int, optional
+                Safety cap on the repair rounds. Sealing one contact can create
+                another (a corner contact resolves to an edge contact first), so
+                this iterates to a fixed point; 8 rounds is far more than the two
+                or three real inputs need. A warning is emitted if the cap is hit
+                with contacts still outstanding.
+
+    Returns
+    -------
+    (M, 3) array of the input dtype, ``M >= N``, deduplicated and sorted.
+
+    Notes
+    -----
+    This changes topology on purpose: welding a pinch point can close a tunnel
+    or merge two components that previously met at a single edge. When that
+    matters, compare `sparsecubes.measure` counts before and after.
+
+    See Also
+    --------
+    sparsecubes.binary.fill_cavities : Fill enclosed voids; never adds a voxel
+                                that touches the exterior, so it cannot fuse.
+    """
+    max_iter = int(max_iter)
+    if max_iter < 0:
+        raise ValueError(f"max_iter must be >= 0, got {max_iter}")
+    # Added cells stay strictly inside the input's bounding box, so a 1-voxel
+    # margin is all the neighbour probing needs.
+    keys, shift = to_keys(voxels, margin=1)
+    if len(keys) == 0:
+        return from_keys(keys, shift, voxels.dtype)
+
+    rounds = 0
+    add = _contact_fixes(keys) if max_iter else np.empty(0, dtype=np.int64)
+    while len(add) and rounds < max_iter:
+        keys = unique_sorted(keys, add)  # both sides are sorted already
+        add = _contact_fixes(keys)
+        rounds += 1
+    if len(add):
+        warnings.warn(
+            f"make_manifold: still found edge/corner-only contacts after "
+            f"{max_iter} rounds; the result may not be manifold. Raise `max_iter`.",
+            stacklevel=3,
+        )
+    return from_keys(keys, shift, voxels.dtype)
 
 
 @sparse_aware

@@ -108,6 +108,19 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify
     -------
     Trimesh
 
+    Notes
+    -----
+    The surface is manifold only if the voxel set is. Two voxels touching along
+    an edge alone hinge four quads on that edge, and two touching at a corner
+    alone pinch the surface to a point - both leave `is_watertight` False (or the
+    Euler number wrong). A solid never does this; a partial `voxelize` fill can.
+    `sparsecubes.binary.make_manifold` seals those contacts first.
+
+    See Also
+    --------
+    sparsecubes.voxelize :      The inverse operation.
+    sparsecubes.binary.make_manifold : Seal edge/corner-only voxel contacts, so
+                                that this returns a manifold surface.
     """
     if not isinstance(voxels, np.ndarray):
         raise TypeError(f'Expected numpy array, got "{type(voxels)}"')
@@ -546,10 +559,20 @@ def _fill_exact(vox, max_depth, max_cavity_size, verbose):
     coords = unpack(band)
     outside = ((coords < vmin) | (coords > vmax)).any(axis=1)
     at_frontier = depth >= max_depth  # only true when the flood was cut off
-    flag = outside | at_frontier
-    exterior = np.zeros(n_comp, dtype=bool)
-    np.logical_or.at(exterior, labels, flag)
+    # `bincount` over the selected labels rather than `logical_or.at` over all of
+    # them: same per-component OR, but it accumulates in int64 over the (small)
+    # True subset instead of materializing a band-sized float64 weights array.
+    reached_frontier = np.bincount(labels[at_frontier], minlength=n_comp) > 0
+    reached_outside = np.bincount(labels[outside], minlength=n_comp) > 0
+    exterior = reached_frontier | reached_outside
     enclosed = ~exterior
+
+    # A component the flood only *ran out of depth* on is unresolved, not proven
+    # exterior - it is exactly the thick void `max_depth` is too small for, and
+    # leaving it silently unfilled is this function's one quiet failure mode.
+    # Reported up rather than warned about here, so the public entry point owns
+    # the warning and its stacklevel (as `voxelize` does with `_warn_broken`).
+    unresolved = int((reached_frontier & ~reached_outside).sum())
     if max_cavity_size is not None:
         sizes = np.bincount(labels, minlength=n_comp)
         enclosed &= sizes <= max_cavity_size
@@ -576,13 +599,14 @@ def _fill_exact(vox, max_depth, max_cavity_size, verbose):
     void_keys = band[enclosed[labels]]
     log(
         f"fill_cavities: depth {reached}, band {len(band)} cells, "
-        f"{int(enclosed.sum())} void(s), {len(void_keys)} cells filled.",
+        f"{int(enclosed.sum())} void(s), {len(void_keys)} cells filled, "
+        f"{unresolved} region(s) unresolved.",
         verbose=verbose,
     )
     if len(void_keys) == 0:
-        return vox  # nothing enclosed - return the (int64) input unchanged
+        return vox, unresolved  # nothing enclosed - the (int64) input unchanged
     voids = unpack(np.sort(void_keys)) + shift
-    return np.vstack([vox, voids])
+    return np.vstack([vox, voids]), unresolved
 
 
 def _fill_closing(vox, verbose):
@@ -628,12 +652,18 @@ def fill_cavities(voxels, *, mode="exact", max_depth=8, max_cavity_size=None, ve
                     morphological closing (dilate then erode); it fills only
                     ~1-voxel voids and **can fuse distinct branches that pass
                     within two voxels of each other** - use with care.
-    max_depth :     int, optional
+    max_depth :     int or None, optional
                     (Exact mode.) Flood depth in voxels; the largest void
                     *thickness from its lining* that can be filled is ``max_depth``.
                     Cost scales with `max_depth`. Voids thicker than this are left
                     unfilled (never mis-filled), so raise it only if thick voids
-                    persist. Default 8.
+                    persist - a warning says when the flood ran out of depth with
+                    candidate voids still open. Default 8, which suits the
+                    thinning pipeline this was written for but silently
+                    under-fills a big hollow object: the interior of a shell 30
+                    voxels across is 15 deep from its lining, so it needs
+                    ``max_depth=15``. Pass ``None`` to size it from the bounding
+                    box, which is always enough and costs accordingly.
     max_cavity_size : int, optional
                     (Exact mode.) If set, enclosed components larger than this many
                     cells are left unfilled (a safety cap). Default ``None``.
@@ -652,10 +682,24 @@ def fill_cavities(voxels, *, mode="exact", max_depth=8, max_cavity_size=None, ve
 
     out_dtype = voxels.dtype
     vox = voxels.astype(np.int64)
+    if max_depth is None:
+        # A void's thickness from its own lining cannot exceed half its smallest
+        # extent, which cannot exceed half the object's - so this always suffices.
+        extent = vox.max(axis=0) - vox.min(axis=0) + 1
+        max_depth = int(extent.min()) // 2 + 1
     if mode == "closing":
         out = _fill_closing(vox, verbose)
     elif mode == "exact":
-        out = _fill_exact(vox, int(max_depth), max_cavity_size, verbose)
+        max_depth = int(max_depth)
+        out, unresolved = _fill_exact(vox, max_depth, max_cavity_size, verbose)
+        if unresolved:
+            warnings.warn(
+                f"fill_cavities: the flood reached max_depth={max_depth} with "
+                f"{unresolved} region(s) still open, so any void thicker than "
+                f"{max_depth} voxels from its lining was left unfilled. Raise "
+                "`max_depth` (or pass None to size it from the bounding box).",
+                stacklevel=3,  # fill_cavities -> sparse_aware -> caller
+            )
     else:
         raise ValueError(f"mode must be 'exact' or 'closing', got {mode!r}")
     return unique(out, axis=0).astype(out_dtype)

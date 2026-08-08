@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import warnings
 
 import numpy as np
 import pytest
@@ -101,8 +102,34 @@ def test_max_depth_gates_thick_voids():
     # treated as exterior), so a too-shallow depth adds nothing rather than a
     # partial fill.
     shell = hollow_box(outer=11, void=7)
-    assert len(fill_cavities(shell, max_depth=3)) == len(shell)
+    with pytest.warns(UserWarning, match="max_depth=3"):
+        assert len(fill_cavities(shell, max_depth=3)) == len(shell)
     assert _as_set(fill_cavities(shell, max_depth=4)) == _as_set(solid_cube(11))
+
+
+@exact_only
+def test_max_depth_none_sizes_itself():
+    # The same void the default depth of 8 would clear, and one it would not.
+    for outer, void in ((11, 7), (41, 37)):
+        shell = hollow_box(outer=outer, void=void)
+        assert _as_set(fill_cavities(shell, max_depth=None)) == _as_set(solid_cube(outer))
+
+
+@exact_only
+def test_deep_void_warns_and_is_left_alone():
+    # A void deeper than max_depth must be left untouched, not partly filled -
+    # and must say so, since silence here reads as "there was nothing to fill".
+    shell = hollow_box(outer=41, void=37)
+    with pytest.warns(UserWarning, match="still open"):
+        out = fill_cavities(shell, max_depth=8)
+    assert _as_set(out) == _as_set(shell)
+
+
+@exact_only
+def test_shallow_void_does_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert len(fill_cavities(hollow_box(7, 1))) == len(solid_cube(7))
 
 
 # --- integration with thin() / skeletonize() ------------------------------

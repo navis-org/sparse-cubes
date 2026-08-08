@@ -348,3 +348,94 @@ def test_thin_and_fill_cavities_are_reachable_here():
 def test_old_toplevel_spelling_explains_the_move(name):
     with pytest.raises(AttributeError, match="moved to"):
         getattr(sc, name)
+
+
+# --- make_manifold ---------------------------------------------------------
+
+
+def _contact_free(voxels):
+    """No two voxels touch along an edge alone or at a corner alone.
+
+    Brute force over the 26-neighbourhood, deliberately independent of the
+    packed-key machinery the implementation uses.
+    """
+    import itertools
+
+    S = _as_set(voxels)
+    for v in S:
+        for d in itertools.product((-1, 0, 1), repeat=3):
+            l1 = sum(map(abs, d))
+            w = (v[0] + d[0], v[1] + d[1], v[2] + d[2])
+            if l1 < 2 or w not in S:
+                continue
+            axes = [i for i in range(3) if d[i]]
+            between = []
+            for r in range(1, len(axes)):
+                for combo in itertools.combinations(axes, r):
+                    b = list(v)
+                    for i in combo:
+                        b[i] += d[i]
+                    between.append(tuple(b))
+            if all(b not in S for b in between):
+                return False
+    return True
+
+
+@pytest.mark.parametrize(
+    "voxels",
+    [
+        pytest.param(np.array([[0, 0, 0], [1, 1, 0]]), id="edge_pair"),
+        pytest.param(np.array([[0, 0, 0], [1, 1, 1]]), id="corner_pair"),
+        pytest.param(np.array([[0, 0, 0], [1, 1, 0], [2, 2, 0]]), id="diagonal_chain"),
+        pytest.param(np.array([[0, 0, 0], [1, -1, 1]]), id="mixed_signs"),
+    ],
+)
+def test_make_manifold_seals_contacts(voxels):
+    out = sb.make_manifold(voxels.astype(np.int64))
+    assert _contact_free(out)
+    assert _as_set(voxels) <= _as_set(out)
+    assert sc.mesh(out, spacing=(1.0, 1.0, 1.0)).is_watertight
+
+
+@pytest.mark.parametrize("shape", [solid_cube(5), hollow_box(7, 3), line(6), l_shape()])
+def test_make_manifold_is_a_noop_on_clean_sets(shape):
+    assert np.array_equal(sb.make_manifold(shape), np.unique(shape, axis=0))
+
+
+def test_make_manifold_stays_inside_the_bounding_box():
+    """Repairs are always cells *between* two existing voxels, never outside."""
+    vox = np.array([[0, 0, 0], [1, 1, 1], [3, 3, 3], [4, 4, 4]])
+    out = sb.make_manifold(vox)
+    assert (out.min(axis=0) >= vox.min(axis=0)).all()
+    assert (out.max(axis=0) <= vox.max(axis=0)).all()
+
+
+def test_make_manifold_preserves_dtype_and_handles_empty():
+    for dtype in (np.int32, np.int64):
+        out = sb.make_manifold(np.array([[0, 0, 0], [1, 1, 0]], dtype=dtype))
+        assert out.dtype == dtype
+    assert len(sb.make_manifold(np.zeros((0, 3), dtype=np.int64))) == 0
+
+
+def test_make_manifold_max_iter_zero_is_identity():
+    vox = np.array([[0, 0, 0], [1, 1, 1]])
+    assert np.array_equal(sb.make_manifold(vox, max_iter=0), np.unique(vox, axis=0))
+
+
+def test_make_manifold_warns_if_it_runs_out_of_rounds():
+    # A corner contact needs two rounds (corner -> edge -> face), so one is short.
+    with pytest.warns(UserWarning, match="max_iter"):
+        sb.make_manifold(np.array([[0, 0, 0], [1, 1, 1]]), max_iter=1)
+
+
+def test_make_manifold_fixes_a_broken_voxelization():
+    """The motivating case: a holed mesh fills partially, leaving shell shards
+    that graze each other, and `mesh` cannot close the surface around them."""
+    from _meshes import PITCH, broken, quiet_voxelize
+
+    vox = quiet_voxelize(broken("shredded"))
+    assert not sc.mesh(vox, spacing=(PITCH,) * 3).is_watertight
+    fixed = sb.make_manifold(vox)
+    assert sc.mesh(fixed, spacing=(PITCH,) * 3).is_watertight
+    assert _contact_free(fixed)
+    assert len(fixed) < 1.05 * len(vox)  # a minimal repair, not a dilation

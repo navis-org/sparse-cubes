@@ -18,13 +18,19 @@ Two stages, both fully vectorized over batches of triangles:
    (`_iter_triangles`) - a triangle spanning `L` cells has `O(L^2)` area but an
    `O(L^3)` bounding box, and splitting keeps total work proportional to area.
 
-2. **Interior** (`_interior_keys`). Sparse scanline parity fill. Each triangle is
+2. **Interior** (`_interior_keys`). Sparse scanline fill. Each triangle is
    rasterized in the XY projection over voxel *column centres*; every hit yields
    one Z crossing. Crossings are sorted per column and paired up, and the cells
    between a pair are emitted as runs. Memory is `O(#crossings + #output)`.
    The even-odd rule makes this independent of face winding (so meshes with
    inconsistent normals still work) and it naturally leaves enclosed cavities
    empty.
+
+   Each crossing also carries the *sign* of the surface it crossed - one `int8`
+   column and one `cumsum` - which pays for the `fill="winding"` rule and for the
+   diagnostics (`_diagnose`). `axes=3` runs the whole fill once per axis and
+   takes the majority, which is the only thing here that recovers a hole. See
+   `voxelize`'s docstring for when to reach for either.
 
    The subtle part is a column centre that lands exactly on a shared triangle
    edge or vertex, which real meshes do constantly - any axis-aligned face whose
@@ -42,11 +48,13 @@ solid path here is the reason this module exists.
 """
 
 import warnings
+from collections import namedtuple
 
 import numpy as np
 import trimesh as tm
 
-from .core import unpack, log, unique, _PACK_FIELD
+from .core import unpack, log, unique, _PACK_FIELD, _sorted_hit
+from ._keys import unique_sorted
 
 # Triangles are split until no edge is longer than this many voxels. Total
 # candidate cells scale as ~area * (K+1)^3 / K^2, which is flat-ish around K=2-6;
@@ -86,7 +94,7 @@ def _key(x, y, z):
     return (x << (2 * _BITS)) | (y << _BITS) | z
 
 
-def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
+def voxelize(mesh, spacing=1.0, *, solid=True, fill="parity", axes=1, verbose=False):
     """Voxelize a triangle mesh into sparse `(N, 3)` integer voxel indices.
 
     The inverse of `sparsecubes.mesh`. Voxel `i` along an axis covers the
@@ -106,12 +114,36 @@ def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
     spacing :   float or length-3 sequence, optional
                 Physical size of one voxel; may be anisotropic. Default 1.0.
     solid :     bool, optional
-                If True (default) fill the interior using an even-odd scanline
-                parity test and return surface + interior voxels. This is exact
-                for watertight meshes, ignores face winding, and leaves enclosed
-                cavities empty. If the mesh is not watertight some columns cannot
-                be paired up; those are left unfilled and a warning is emitted.
-                If False, return only the conservative surface shell.
+                If True (default) fill the interior with a scanline test (see
+                `fill`) and return surface + interior voxels. If False, return
+                only the conservative surface shell.
+    fill :      {"parity", "winding"}, optional
+                Which rule decides what is inside, for ``solid=True``.
+
+                ``"parity"`` (default) is the even-odd rule: crossings are paired
+                up along the column. It ignores face winding entirely, so meshes
+                with inconsistent normals fill correctly, and it leaves enclosed
+                cavities empty. Its blind spot is anything that makes a column's
+                crossings *not* alternate inside/outside: overlapping or nested
+                shells come out with the overlap carved away as a void, and a
+                duplicated face flips the column's parity and drills a hole.
+
+                ``"winding"`` is the nonzero rule: fill wherever the running
+                signed crossing count is nonzero. That unions overlapping and
+                nested shells and shrugs off duplicated faces, at the price of
+                needing consistent winding - with normals flipped at random it
+                welds concave gaps shut.
+
+                Neither rule recovers an actual hole; see `axes`. Whichever is
+                selected, both are evaluated for the diagnostics, and a warning
+                is emitted where they disagree.
+    axes :      {1, 3}, optional
+                How many directions to sweep when filling. ``1`` (default) fills
+                along Z only. ``3`` fills along X, Y and Z independently and
+                keeps the voxels at least two sweeps claim. A defect that breaks
+                the columns along one axis usually leaves the other two intact,
+                so the majority repairs holes that no single sweep can - at three
+                times the cost of the fill stage.
     verbose :   bool, optional. Log progress.
 
     Returns
@@ -120,17 +152,34 @@ def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
     absolute and may be negative (dtype is ``int32`` when the values fit,
     otherwise ``int64``).
 
+    Warns
+    -----
+    Once if some columns do not close (the mesh is not watertight there), with an
+    upper bound on how much of the solid that could cost, and once if the parity
+    and winding rules disagree (self-intersection, nesting, duplicated faces, or
+    inconsistent winding). Neither warning fires on a clean mesh.
+
     Notes
     -----
     The per-axis extent is limited to `pack`'s 21-bit fields (~2.1e6 voxels along
     any one axis); coarsen `spacing` for very large meshes.
 
+    Only vertices actually referenced by `faces` constrain the grid, so a stray
+    unused vertex far from the mesh costs nothing.
+
     See Also
     --------
     sparsecubes.mesh :          The inverse operation.
     sparsecubes.binary.fill_cavities : Fill enclosed voids in an existing voxel set.
+    sparsecubes.binary.make_manifold : Seal the edge/corner-only voxel contacts a
+                                partial fill leaves behind, which would otherwise
+                                make `mesh`'s output non-manifold.
     """
     vertices, faces = _as_mesh(mesh)
+    if fill not in ("parity", "winding"):
+        raise ValueError(f"`fill` must be 'parity' or 'winding', got {fill!r}.")
+    if axes not in (1, 3):
+        raise ValueError(f"`axes` must be 1 or 3, got {axes!r}.")
 
     spacing = np.asarray(spacing, dtype=np.float64).ravel()
     if spacing.size == 1:
@@ -147,11 +196,21 @@ def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
     # containing a point is simply floor(). The +0.5 encodes the centre-sampling
     # convention documented above.
     verts = vertices.astype(np.float64) / spacing + 0.5
-    if not np.all(np.isfinite(verts)):
+
+    # Only *referenced* vertices constrain the grid. An unused vertex parked far
+    # from the mesh (common in hand-edited or partially-decimated files) would
+    # otherwise inflate the extent and trip the range guard below on a mesh that
+    # fits comfortably. The `.all()` short-circuit keeps the usual case copy-free.
+    used = np.zeros(len(verts), dtype=bool)
+    used[faces] = True
+    ref = verts if used.all() else verts[used]
+    del used
+    if not np.all(np.isfinite(ref)):
         raise ValueError("Mesh contains non-finite vertices.")
 
-    imin = np.floor(verts.min(axis=0)).astype(np.int64)
-    imax = np.floor(verts.max(axis=0)).astype(np.int64)
+    imin = np.floor(ref.min(axis=0)).astype(np.int64)
+    imax = np.floor(ref.max(axis=0)).astype(np.int64)
+    del ref
     # `pack` needs non-negative coordinates; keep a one-cell margin on both sides
     # so neighbour arithmetic on the returned keys stays in range.
     shift = imin - 1
@@ -171,7 +230,15 @@ def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
     surface = _surface_keys(verts, faces, shift, verbose)
     keys = surface
     if solid:
-        interior = _interior_keys(verts, faces, shift, verbose)
+        interior, diag = _fill_interior(verts, faces, shift, fill, axes, verbose)
+        # The counts behind the warnings, on the channel the rest of the library
+        # uses - so a caller can see them without scraping a warning string.
+        log(
+            f"voxelize: fill({fill}) over {diag.columns} column(s): {diag.open_} "
+            f"open ({diag.odd} odd), {diag.ambiguous} rule-ambiguous.",
+            verbose=verbose,
+        )
+        _warn_broken(diag, fill, axes, len(interior))
         if len(interior):
             keys = unique(np.concatenate([surface, interior]))
     log(
@@ -192,21 +259,39 @@ def voxelize(mesh, spacing=1.0, *, solid=True, verbose=False):
 
 
 def _as_mesh(mesh):
-    """Accept a `trimesh.Trimesh` or a `(vertices, faces)` pair."""
+    """Normalize a `trimesh.Trimesh` or `(vertices, faces)` pair, and vet it.
+
+    The one seam mesh input comes through, so it is where every check belongs.
+    Beyond shape, `faces` has to be checked against `len(vertices)`: a stale index
+    would otherwise surface as numpy's bare `IndexError` from deep inside the
+    surface stage, and a *negative* one would not raise at all - it wraps around
+    and silently voxelizes a triangle the file never described.
+    """
     if isinstance(mesh, tm.Trimesh):
-        return np.asarray(mesh.vertices), np.asarray(mesh.faces)
-    if isinstance(mesh, (tuple, list)) and len(mesh) == 2:
+        vertices, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
+    elif isinstance(mesh, (tuple, list)) and len(mesh) == 2:
         vertices = np.asarray(mesh[0], dtype=np.float64)
         faces = np.asarray(mesh[1])
         if vertices.ndim != 2 or vertices.shape[1] != 3:
             raise TypeError("`vertices` must be a (V, 3) array.")
         if faces.ndim != 2 or faces.shape[1] != 3:
             raise TypeError("`faces` must be a (F, 3) array of triangles.")
-        return vertices, faces
-    raise TypeError(
-        "Expected a trimesh.Trimesh or a (vertices, faces) tuple, "
-        f"got {type(mesh).__name__}."
-    )
+    else:
+        raise TypeError(
+            "Expected a trimesh.Trimesh or a (vertices, faces) tuple, "
+            f"got {type(mesh).__name__}."
+        )
+
+    if faces.size:
+        if not np.issubdtype(faces.dtype, np.integer):
+            raise TypeError(f"`faces` must have an integer dtype, got {faces.dtype}.")
+        lo, hi = int(faces.min()), int(faces.max())
+        if lo < 0 or hi >= len(vertices):
+            raise ValueError(
+                f"`faces` indexes vertices [{lo}, {hi}], outside the {len(vertices)} "
+                "vertices provided (negative indices are rejected, not wrapped)."
+            )
+    return vertices, faces
 
 
 def _batch_bounds(cost, budget):
@@ -432,41 +517,121 @@ def _bbox_cells(lo, dims, counts, start, end):
     return (within, j, k), tri_id
 
 
-def _interior_keys(verts, faces, shift, verbose):
-    """Sparse scanline parity fill -> sorted packed keys of interior voxels."""
-    cols, zs = _z_crossings(verts, faces, shift)
+# What the fill stage learned about the mesh on the way past. `open_` and `odd`
+# count columns whose crossings do not describe a closed solid; `ambiguous`
+# counts those where the two fill rules disagree.
+_Diagnostics = namedtuple("_Diagnostics", "columns open_ odd ambiguous")
+_CLEAN = _Diagnostics(0, 0, 0, 0)
+
+
+def _fill_interior(verts, faces, shift, rule, axes, verbose):
+    """Interior voxels: one sweep along Z, or a majority vote over all three axes."""
+    if axes == 1:
+        return _interior_keys(verts, faces, shift, rule, verbose)
+
+    # `_PROJECTIONS` is cyclic, so its three permutations put each axis in the
+    # sweep (Z) slot exactly once. Permuting the *keys* back afterwards beats
+    # unpacking to coordinates: it is three shift-and-mask passes over one int64
+    # column instead of an (N, 3) temporary per sweep.
+    swept, diags = [], []
+    for perm in _PROJECTIONS:
+        keys, diag = _interior_keys(
+            verts[:, perm], faces, shift[list(perm)], rule, verbose
+        )
+        # A sweep emits its keys in (column, z) order, so the identity permutation
+        # is already sorted; the other two shuffle the fields and are not.
+        keys = _permute_key(keys, perm)
+        swept.append(unique_sorted(keys) if perm == _PROJECTIONS[0] else unique(keys))
+        diags.append(diag)
+    sizes = [len(s) for s in swept]
+    keys = _majority(swept)
+    log(f"voxelize: 3-axis vote over {sizes} -> {len(keys)} voxel(s).", verbose=verbose)
+    return keys, _Diagnostics(*map(sum, zip(*diags)))
+
+
+def _permute_key(keys, perm):
+    """Reinterpret keys packed in `perm` axis order as keys in canonical XYZ order.
+
+    Field `j` of the input holds the coordinate of original axis ``perm[j]``, so
+    the fix-up is a pure field shuffle - no unpack/repack, and the shifts are
+    identical either way because `voxelize` sizes its range guard on the largest
+    axis.
+    """
+    if tuple(perm) == (0, 1, 2) or len(keys) == 0:
+        return keys
+    mask = _PACK_FIELD - 1
+    out = np.zeros_like(keys)
+    for j, axis in enumerate(perm):
+        out |= ((keys >> ((2 - j) * _BITS)) & mask) << ((2 - axis) * _BITS)
+    return out
+
+
+def _majority(sets):
+    """Keys claimed by at least two of three sorted, deduplicated key arrays.
+
+    ``(A&B) | (A&C) | (B&C)``, evaluated as membership tests rather than by
+    sorting the concatenation. **Consumes `sets`**: the three sweeps are each the
+    size of the solid, and dropping the caller's references before the merge is
+    what keeps this from peaking at five copies of it.
+
+    Both selections preserve their (sorted) input's order, so the merge only has
+    to interleave two runs.
+    """
+    a, b, c = sets
+    del sets[:]  # `a`/`b`/`c` are now the only references
+    both = b[_sorted_hit(b, c)]
+    kept = a[_sorted_hit(a, b) | _sorted_hit(a, c)]
+    del a, b, c
+    return unique_sorted(kept, both)
+
+
+def _interior_keys(verts, faces, shift, rule, verbose):
+    """Sparse scanline fill -> (packed keys of interior voxels, `_Diagnostics`)."""
+    cols, zs, sgn = _z_crossings(verts, faces, shift)
     if len(cols) == 0:
-        return np.empty(0, dtype=np.int64)
+        return np.empty(0, dtype=np.int64), _CLEAN
 
     order = np.lexsort((zs, cols))
-    cols, zs = cols[order], zs[order]
+    cols, zs, sgn = cols[order], zs[order], sgn[order]
+    del order
 
-    # Column boundaries in the sorted crossing list.
-    starts = np.flatnonzero(np.concatenate([[True], cols[1:] != cols[:-1]]))
+    # Column boundaries in the sorted crossing list. `same` does double duty: the
+    # column starts are where it is False, and it is also the span mask below.
+    same = cols[1:] == cols[:-1]
+    starts = np.flatnonzero(np.concatenate([[True], ~same]))
     counts = np.diff(np.concatenate([starts, [len(cols)]]))
-    n_odd = int((counts % 2).sum())
-    if n_odd:
-        warnings.warn(
-            f"{n_odd} of {len(starts)} voxel columns have an odd number of surface "
-            "crossings, which means the mesh is not watertight. Those columns were "
-            "left unfilled; the result may be incomplete. Repair the mesh (e.g. "
-            "trimesh's `fill_holes`) or use `solid=False`.",
-            stacklevel=3,
-        )
 
-    # Pair crossings up within each column: (0, 1), (2, 3), ... An unpaired
-    # trailing crossing in an open column is simply dropped.
-    n_pairs = counts // 2
-    keep = n_pairs > 0
-    starts, n_pairs = starts[keep], n_pairs[keep]
-    if len(n_pairs) == 0:
-        return np.empty(0, dtype=np.int64)
+    # Winding number just *above* each crossing, within its own column: the net
+    # signed crossing count so far. One cumsum, minus the running total the
+    # column started from. int32 is ample - the running sum is bounded by the
+    # crossing count - and halves the two per-crossing arrays that set peak here.
+    running = np.cumsum(sgn, dtype=np.int32)
+    base = np.concatenate([[0], running[starts[1:] - 1]])
+    winding = running - np.repeat(base, counts)
+    del running, base, sgn
 
-    # Pair `p` of a column starting at `s` uses crossings s + 2p and s + 2p + 1.
-    within = _expand_runs(np.zeros(len(n_pairs), dtype=np.int64), n_pairs)
-    lower = np.repeat(starts, n_pairs) + 2 * within
+    # Span `i` runs from crossing `i` up to crossing `i + 1` of the same column;
+    # the last crossing of a column starts no span.
+    span = np.concatenate([same, [False]])
+    del same
+    # Even-odd pairs crossings (0, 1), (2, 3), ...: fill from every even-indexed
+    # crossing. An unpaired trailing crossing starts no span and is dropped.
+    within = np.arange(len(cols), dtype=np.int64) - np.repeat(starts, counts)
+    parity_fill = span & (within & 1 == 0)  # `& 1`: `% 2` is division-based
+    del within
+    winding_fill = span & (winding != 0)
+    fill = winding_fill if rule == "winding" else parity_fill
+
+    diag = _diagnose(starts, counts, winding, parity_fill, winding_fill)
+    del span, winding, parity_fill, winding_fill
+
+    lower = np.flatnonzero(fill)
+    del fill
+    if len(lower) == 0:
+        return np.empty(0, dtype=np.int64), diag
     col_of = cols[lower]
     z0, z1 = zs[lower], zs[lower + 1]
+    del lower, cols, zs
 
     # A voxel is interior iff its centre (iz + 0.5 in cell units) lies inside the
     # span. Empty spans (thinner than one voxel) drop out via lengths <= 0.
@@ -475,7 +640,7 @@ def _interior_keys(verts, faces, shift, verbose):
     lengths = b - a + 1
     valid = lengths > 0
     if not valid.any():
-        return np.empty(0, dtype=np.int64)
+        return np.empty(0, dtype=np.int64), diag
     a, lengths, col_of = a[valid], lengths[valid], col_of[valid]
 
     # Expand in chunks so a huge solid never needs one giant temporary.
@@ -488,17 +653,100 @@ def _interior_keys(verts, faces, shift, verbose):
         out.append((col << _BITS) | z)
     keys = np.concatenate(out) if len(out) > 1 else out[0]
     log(f"voxelize: fill stage emitted {len(keys)} interior voxel(s).", verbose=verbose)
-    return keys
+    return keys, diag
+
+
+def _diagnose(starts, counts, winding, parity_fill, winding_fill):
+    """Summarize what the crossing list says about the mesh's integrity.
+
+    All of it is a handful of passes over the *crossings*, which scale with
+    surface area - cheap next to the fill they accompany, which scales with
+    volume. Two independent signals:
+
+    - A column whose winding does not return to zero has an unmatched surface
+      somewhere along it: the mesh is open there. This subsumes the odd-crossing
+      test (odd count implies odd, hence nonzero, sum) and additionally catches
+      the even-count breakages an odd test cannot see, such as a duplicated face.
+    - The two fill rules disagreeing means the crossings do not simply alternate
+      inside/outside. That is the fingerprint of a self-intersecting, nested or
+      duplicated surface - the failure the parity fill would otherwise commit
+      silently, handing back a plausible solid with the overlap carved out.
+    """
+    open_cols = winding[starts + counts - 1] != 0
+    # On a clean mesh the two rules agree everywhere, and `any` bails on the
+    # first crossing that differs - so the segmented reduce, which would walk
+    # every column, only runs when there is actually something to report.
+    differs = parity_fill != winding_fill
+    ambiguous = (
+        int(np.bitwise_or.reduceat(differs, starts).sum()) if differs.any() else 0
+    )
+    return _Diagnostics(
+        columns=len(starts),
+        open_=int(open_cols.sum()),
+        odd=int((counts & 1).sum()),
+        ambiguous=ambiguous,
+    )
+
+
+def _warn_broken(diag, rule, axes, n_filled):
+    """Turn the fill diagnostics into at most two actionable warnings."""
+    sweeps = "" if axes == 1 else " (summed over 3 sweeps)"
+    if diag.open_:
+        # What a broken column *would* have filled is unknowable - the surface
+        # that closes it is simply absent - so scale by the mean depth of the
+        # sound columns. That runs low where the damage sits on the thickest part
+        # of the object, but an order of magnitude is what a user deciding
+        # whether to trust the result needs, and a column count alone gives none.
+        sound = diag.columns - diag.open_
+        if sound > 0:
+            missing = round(diag.open_ * n_filled / sound)
+            share = 100.0 * missing / max(missing + n_filled, 1)
+            scale = (
+                f"At the mean depth of the {sound} sound column(s) that is roughly "
+                f"{missing} voxel(s) missing, ~{share:.0f}% of the solid."
+            )
+        else:
+            scale = "No column closed, so nothing was filled."
+        hint = "Repair the mesh (e.g. trimesh's `fill_holes`)"
+        if axes == 1:
+            hint += ", pass `axes=3` to recover the columns from the other two sweeps,"
+        warnings.warn(
+            f"{diag.open_} of {diag.columns} voxel columns{sweeps} do not close "
+            f"({diag.odd} of them from an odd crossing count), so the mesh is not "
+            f"watertight along them. They were left unfilled. {scale} "
+            f"{hint} or use `solid=False`.",
+            stacklevel=3,
+        )
+    if diag.ambiguous:
+        consequence = (
+            "`fill='winding'` unions them, but needs consistent winding; "
+            "cross-check against `fill='parity'`."
+            if rule == "winding"
+            else "`fill='parity'` carves the overlaps out as enclosed voids; "
+            "`fill='winding'` unions them instead, or fill them afterwards with "
+            "`sparsecubes.binary.fill_cavities`."
+        )
+        warnings.warn(
+            f"{diag.ambiguous} of {diag.columns} voxel columns{sweeps} where the "
+            "even-odd and winding rules disagree: the mesh self-intersects, has "
+            f"nested or duplicated surfaces, or has inconsistent face winding. "
+            f"{consequence}",
+            stacklevel=3,
+        )
 
 
 def _z_crossings(verts, faces, shift):
     """Z coordinates where the mesh crosses each voxel column's centre line.
 
-    Returns `(column_key, z)` with `column_key = (x << _BITS) | y` in shifted
-    coordinates and `z` in unshifted cell units. As in the surface stage all
-    coefficients are per-triangle, so the per-candidate cost is a gather.
+    Returns `(column_key, z, sign)` with `column_key = (x << _BITS) | y` in
+    shifted coordinates and `z` in unshifted cell units. As in the surface stage
+    all coefficients are per-triangle, so the per-candidate cost is a gather.
+
+    `sign` is +1 where the surface faces along +Z and -1 where it faces along -Z,
+    i.e. the direction the column passes through it. Summing it gives the winding
+    number the fill and the diagnostics both run on; it costs one int8 column.
     """
-    cols_out, zs_out = [], []
+    cols_out, zs_out, sg_out = [], [], []
     for tris in _iter_triangles(verts, faces):
         v0, v1, v2 = tris[:, 0], tris[:, 1], tris[:, 2]
         n = np.cross(v1 - v0, v2 - v1)
@@ -512,7 +760,9 @@ def _z_crossings(verts, faces, shift):
 
         # Orient the XY projection counter-clockwise so the edge functions are
         # positive inside. `n`/`v0` stay untouched for the plane solve below.
+        # The same test is the crossing direction, so the sign comes for free.
         flip = n[:, 2] < 0
+        sign = np.where(flip, np.int8(-1), np.int8(1))
         w0 = v0[:, :2]
         w1 = np.where(flip[:, None], v2[:, :2], v1[:, :2])
         w2 = np.where(flip[:, None], v1[:, :2], v2[:, :2])
@@ -570,10 +820,15 @@ def _z_crossings(verts, faces, shift):
             z = zc[tri_id] + zx[tri_id] * qx + zy[tri_id] * qy
             cols_out.append(_key2(cx, cy))
             zs_out.append(z)
+            sg_out.append(sign[tri_id])
 
     if not cols_out:
-        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
-    return np.concatenate(cols_out), np.concatenate(zs_out)
+        return (
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.int8),
+        )
+    return np.concatenate(cols_out), np.concatenate(zs_out), np.concatenate(sg_out)
 
 
 def _key2(x, y):
@@ -615,6 +870,15 @@ def _edge_functions(w0, w1, w2):
     only at the base, so a point sitting on the *other* end of the edge - a shared
     mesh vertex - would not be recognized as a tie at all, and the perturbation
     rule in `_point_in_triangle` would never get to run.
+
+    One caveat on the tie-break, as opposed to the crossing *count*: the exact
+    negation assumes the two triangles traverse their shared edge in opposite
+    directions, which is what a consistently wound mesh does. Where the winding
+    is inconsistent they traverse it the same way, both get the same sign, and a
+    point exactly on that edge is claimed twice or not at all. So the even-odd
+    fill's winding-independence is exact for the pairing and merely
+    near-exact at the ties - measurably so: flipping half a torus's faces moves a
+    couple of voxels out of ~19k. Everything else about it is winding-free.
     """
     out = []
     for p, q in ((w0, w1), (w1, w2), (w2, w0)):

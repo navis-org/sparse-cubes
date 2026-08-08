@@ -197,6 +197,7 @@ inconsistent normals still work) and enclosed cavities are correctly left empty.
 >>> vox = sc.voxelize(mesh, spacing=1.0)               # solid
 >>> vox = sc.voxelize(mesh, spacing=1.0, solid=False)  # surface shell only
 >>> vox = sc.voxelize(mesh, spacing=(0.5, 0.5, 1.0))   # anisotropic
+>>> vox = sc.voxelize(mesh, spacing=1.0, fill="winding", axes=3)  # broken mesh
 ```
 
 Voxel `i` along an axis covers `[(i - 0.5) * spacing, (i + 0.5) * spacing)`, so
@@ -214,9 +215,44 @@ cube of the largest coordinate), which is exactly what this library exists to
 avoid. `sc.voxelize` fills sparsely, so peak memory tracks the object rather than
 its bounding box.
 
-If a mesh is not watertight some columns cannot be paired up. Those are left
-unfilled and a warning names how many; either repair the mesh first
-(`trimesh`'s `fill_holes`) or pass `solid=False`.
+### Broken meshes
+
+Voxelizing is a natural way to *repair* a mesh - `sc.voxelize` then `sc.mesh`
+rebuilds it from scratch - so it is worth being precise about what survives the
+round trip. Inconsistent or flipped normals, non-manifold edges, degenerate
+triangles and stray unreferenced vertices are all handled silently and exactly.
+Three things are not, and each has a knob:
+
+| defect | what the default does | fix |
+| --- | --- | --- |
+| **holes** | the columns through the hole never close, so a whole span of the solid is dropped | `axes=3` |
+| **self-intersection, nested or duplicated surfaces** | even-odd carves the overlap out as an enclosed void | `fill="winding"` |
+| **partial fills** | leftover shell fragments graze each other, and `sc.mesh` cannot close a manifold surface around them | `sc.binary.make_manifold` |
+
+`fill` picks the rule that decides what is inside. The default `"parity"`
+(even-odd) ignores winding entirely, which is why flipped normals cost nothing;
+its blind spot is anything that stops a column's crossings alternating
+inside/outside. `"winding"` (nonzero) unions overlapping and nested shells and
+shrugs off duplicated faces, but it does need consistent winding - with normals
+flipped at random it welds concave gaps shut. Neither rule invents a surface that
+is not there, so neither recovers a hole.
+
+`axes` is what recovers holes. `axes=3` fills along X, Y and Z and keeps the
+voxels at least two sweeps claim; a hole that breaks the Z columns through it
+usually leaves the X and Y columns intact. On a sphere with an entire cap
+removed, the default returns 63% of the true volume and `axes=3` returns 112%
+(against the ~118% every conservative voxelization of that resolution returns).
+It costs three fills, so it is opt-in.
+
+Every call also reports what it saw. One warning fires when columns do not close,
+with an estimate of how much solid that costs; a second fires when the even-odd
+and winding rules disagree, which is the only signal that an otherwise plausible
+result has an overlap carved out of it. A clean mesh triggers neither.
+
+One thing no knob changes: conservative voxelization claims every voxel the
+surface touches, so the solid grows by a roughly constant ~0.7 voxels outward
+regardless of resolution. Round-tripping a mesh inflates it; resolution shrinks
+the error relative to the object, not relative to the grid.
 
 ## Thinning, centerline & TEASAR skeletons
 
@@ -501,6 +537,7 @@ split by what they return:
 | `difference` / `symmetric_difference` | subtraction / XOR | `volume` / `surface_area` | with optional `spacing` |
 | `isin` / `index_of` | per-row membership / row lookup | `bounding_box` / `centroid` | index bounds / centre of mass |
 | `thin` / `fill_cavities` | topological thinning / void fill | `distance_transform` | exact sparse EDT |
+| `make_manifold` | seal edge/corner-only contacts | | |
 | | | `iou` / `dice` | set similarity of two clouds |
 | | | `tube_profile` | Fourier cross-sections along a skeleton |
 
@@ -520,7 +557,11 @@ the sparse background shell instead of a dense grid.
 
 Two caveats worth knowing. `closing` can **fuse** structures that pass within
 `2 * iterations` voxels of each other; when you specifically want enclosed voids
-filled without that risk, `fill_cavities(mode="exact")` is topology-safe.
+filled without that risk, `fill_cavities(mode="exact")` is topology-safe. Its
+`max_depth` (default 8) bounds how thick a void it can reach: the interior of a
+shell 30 voxels across is 15 deep from its lining, so a default-depth call leaves
+it alone and says so. Pass `max_depth=None` to size the flood from the bounding
+box.
 And `connected_components` supports `connectivity=6` or `26` only (not 18), since
 the underlying routine does not distinguish 18 from 26.
 

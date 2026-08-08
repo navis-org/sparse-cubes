@@ -1,6 +1,7 @@
 """Tests for `sparsecubes.voxelize` (mesh -> sparse voxels)."""
 
 import os
+import re
 import warnings
 
 import numpy as np
@@ -11,6 +12,7 @@ import sparsecubes as sc
 from sparsecubes.core import INT_DTYPES
 from _shapes import solid_cube, n_components
 from _voxel_oracle import reference_bounds
+from _meshes import PITCH, broken, quiet_voxelize, sphere
 
 DATA = os.path.join(os.path.dirname(__file__), "10075_coarse.npy")
 
@@ -121,15 +123,6 @@ def test_face_diagonal_through_column_centres():
         np.meshgrid(*[np.arange(-2, 3)] * 3, indexing="ij"), -1
     ).reshape(-1, 3)
     assert as_set(out) == as_set(expected)
-
-
-def test_no_spurious_watertight_warning():
-    """Watertight meshes must pair up every column without complaint."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        for name, m in PRIMITIVES.items():
-            assert m.is_watertight, name
-            sc.voxelize(m, 0.9)
 
 
 def test_enclosed_cavity_stays_empty():
@@ -307,3 +300,158 @@ def test_no_densification_on_a_real_mesh():
         f"peak {peak / 1e6:.0f} MB vs {dense_bytes / 1e6:.0f} MB for a dense "
         "bool grid - looks like the bounding box got materialized"
     )
+
+
+# --- broken meshes: fill rules, sweeps, diagnostics ------------------------
+
+def test_fill_rules_agree_on_a_clean_mesh():
+    """The two rules may only differ where the mesh is not a simple solid."""
+    a = sc.voxelize(sphere(), PITCH, fill="parity")
+    b = sc.voxelize(sphere(), PITCH, fill="winding")
+    assert as_set(a) == as_set(b)
+
+
+def test_parity_is_winding_independent():
+    """Even-odd must not care how the normals point - that is its whole selling point."""
+    ref = sc.voxelize(sphere(), PITCH)
+    out = quiet_voxelize(broken("flipped"))
+    assert as_set(out) == as_set(ref)
+
+
+def test_winding_rule_unions_overlapping_shells():
+    """Parity carves the overlap out as a void; nonzero winding fills it."""
+    ref = sc.voxelize(sphere(), PITCH)
+    for kind in ("overlap", "nested"):
+        par, win = quiet_voxelize(broken(kind)), quiet_voxelize(broken(kind), fill="winding")
+        assert as_set(par) < as_set(win), f"{kind}: winding must be a strict superset"
+    # Nesting is the sharp case: the inner shell must not hollow the solid out.
+    assert as_set(quiet_voxelize(broken("nested"), fill="winding")) == as_set(ref)
+
+
+def test_winding_rule_survives_duplicated_faces():
+    """A duplicated face flips a column's parity; the signed count is immune."""
+    ref = sc.voxelize(sphere(), PITCH)
+    assert as_set(quiet_voxelize(broken("dup_faces"), fill="winding")) == as_set(ref)
+
+
+def test_winding_rule_needs_consistent_winding():
+    """The documented trade-off: nonzero welds gaps shut when normals are random.
+
+    Two separated spheres give every column through them four crossings, so a
+    sign error in the pair bounding the gap fills it in. Parity cannot do this,
+    which is exactly why it stays the default.
+    """
+    lo, hi = tm.creation.icosphere(subdivisions=3, radius=0.6), tm.creation.icosphere(
+        subdivisions=3, radius=0.6
+    )
+    lo.apply_translation([0, 0, -0.9])
+    hi.apply_translation([0, 0, 0.9])
+    stack = tm.util.concatenate([lo, hi])
+    f = stack.faces.copy()
+    flip = np.random.default_rng(7).random(len(f)) < 0.5
+    f[flip] = f[flip][:, ::-1]
+    broken = (stack.vertices, f)
+
+    assert as_set(quiet_voxelize(broken)) == as_set(quiet_voxelize(stack))  # parity unaffected
+    assert len(quiet_voxelize(broken, fill="winding")) > len(quiet_voxelize(stack, fill="winding"))
+
+
+def test_three_axis_vote_recovers_a_hole():
+    """A hole breaks the Z columns through it; X and Y outvote them."""
+    holed = broken("cap_off")
+    one, three = quiet_voxelize(holed), quiet_voxelize(holed, axes=3)
+    full = sc.voxelize(sphere(), PITCH)
+    assert len(one) < len(three) <= len(full)
+    # Within 15% of the intact solid, from a mesh missing an entire cap.
+    assert len(three) > 0.85 * len(full)
+
+
+def test_three_axis_vote_is_a_noop_on_a_clean_mesh():
+    for kind, mesh in (("sphere", sphere()), ("box", tm.creation.box(extents=[3, 5, 7]))):
+        assert as_set(sc.voxelize(mesh, PITCH, axes=3)) == as_set(
+            sc.voxelize(mesh, PITCH)
+        ), kind
+
+
+@pytest.mark.parametrize("name", sorted(PRIMITIVES))
+@pytest.mark.parametrize(
+    "kwargs", [{}, {"fill": "winding"}, {"axes": 3}], ids=["parity", "winding", "axes3"]
+)
+def test_clean_mesh_warns_about_nothing(name, kwargs):
+    """A watertight mesh must pair up every column without complaint, whichever
+    rule and however many sweeps."""
+    mesh = PRIMITIVES[name]
+    assert mesh.is_watertight, name
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sc.voxelize(mesh, 0.9, **kwargs)
+
+
+def _warned(mesh, **kw):
+    """Every warning `voxelize` raises, as one blob of text."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        sc.voxelize(mesh, PITCH, **kw)
+    return " || ".join(str(w.message) for w in caught)
+
+
+def test_open_mesh_warns_with_a_damage_estimate():
+    msg = _warned(broken("cap_off"))
+    assert re.search(r"do not close.*roughly \d+ voxel", msg)
+
+
+def test_self_intersection_warns_though_no_column_is_open():
+    """The silent failure this diagnostic exists for: every column closes, yet
+    the parity fill hands back a solid with the overlap carved out as a void."""
+    for kind in ("overlap", "nested"):
+        msg = _warned(broken(kind))
+        assert "even-odd and winding rules disagree" in msg, kind
+        assert "do not close" not in msg, f"{kind}: nothing is actually open here"
+
+
+def test_duplicated_faces_trip_both_diagnostics():
+    """A duplicated face leaves the crossing count even but the winding
+    unbalanced, so the signed test sees it where an odd-count test cannot - and
+    the two rules disagree about the column as well."""
+    msg = _warned(broken("dup_faces"))
+    assert "do not close" in msg
+    assert "even-odd and winding rules disagree" in msg
+
+
+# --- input validation ------------------------------------------------------
+
+
+def test_unreferenced_vertex_does_not_constrain_the_grid():
+    s = sphere()
+    ref = sc.voxelize(s, 0.02)
+    stray = np.vstack([s.vertices, [[1e5, 0.0, 0.0]]])
+    assert np.array_equal(sc.voxelize((stray, s.faces), 0.02), ref)
+    # ... and a non-finite value in an unused vertex is equally irrelevant.
+    nan = np.vstack([s.vertices, [[np.nan] * 3]])
+    assert np.array_equal(sc.voxelize((nan, s.faces), 0.02), ref)
+
+
+@pytest.mark.parametrize("bad", [10**6, -3])
+def test_out_of_range_face_index_is_rejected(bad):
+    s = sphere()
+    with pytest.raises(ValueError, match="indexes vertices"):
+        sc.voxelize((s.vertices, np.vstack([s.faces, [[0, 1, bad]]])), 1.0)
+
+
+def test_non_integer_faces_are_rejected():
+    s = sphere()
+    with pytest.raises(TypeError, match="integer dtype"):
+        sc.voxelize((s.vertices, s.faces.astype(float)), 1.0)
+
+
+def test_non_finite_referenced_vertex_is_rejected():
+    s = sphere()
+    v = np.vstack([s.vertices[:-1], [[np.nan] * 3]])
+    with pytest.raises(ValueError, match="non-finite"):
+        sc.voxelize((v, s.faces), 1.0)
+
+
+@pytest.mark.parametrize("kwargs", [{"fill": "nonzero"}, {"axes": 2}])
+def test_bad_options_are_rejected(kwargs):
+    with pytest.raises(ValueError):
+        sc.voxelize(sphere(), 1.0, **kwargs)
