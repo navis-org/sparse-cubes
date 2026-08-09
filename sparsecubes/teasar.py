@@ -30,7 +30,7 @@ See TEASAR (Sato et al. 2000) and kimimaro
 
 import numpy as np
 
-from .core import pack, log, unique, boundary_shell
+from .core import pack, log, unique, unique_rows, boundary_shell
 from .thinning import _OFF26, _validate, _check_extent
 from .skeleton import Skeleton, _prune_spurs, _as_spacing, _validate_edges
 from ._sparse import sparse_aware
@@ -675,7 +675,8 @@ def teasar_skeletonize(
     # dedup/reorder them; `_neighbors_26` reorders, so it is skipped below too.
     if edges is None:
         if check_unique:
-            vox = unique(voxels, axis=0).astype(np.int64)
+            # `_neighbors_26` reorders by packed key, so dedup order is moot.
+            vox = unique_rows(voxels, sort=False).astype(np.int64)
         else:
             vox = np.ascontiguousarray(voxels).astype(np.int64)
     else:

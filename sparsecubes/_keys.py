@@ -15,7 +15,7 @@ at ``y == 0`` would silently borrow and alias onto a genuine voxel.
 
 import numpy as np
 
-from .core import INT_DTYPES, _PACK_FIELD, pack, unpack, unique
+from .core import INT_DTYPES, _PACK_FIELD, pack, unique, unpack
 
 # Bit offsets of pack()'s default (21, 21, 21) layout.
 _X_SHIFT, _Y_SHIFT = 42, 21

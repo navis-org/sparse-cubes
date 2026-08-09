@@ -18,10 +18,9 @@ from ._keys import (
     sorted_hit,
     to_common_keys,
     to_keys,
-    unique,
     validate,
 )
-from .core import _component_labels, boundary_shell, pack
+from .core import _component_labels, boundary_shell, pack, unique_rows
 
 from ._sparse import sparse_aware
 
@@ -145,7 +144,8 @@ def volume(voxels, spacing=None):
     float
     """
     validate(voxels)
-    n = len(unique(voxels, axis=0)) if len(voxels) else 0
+    # Only the count is wanted, so the row order is never looked at.
+    n = len(unique_rows(voxels, sort=False)) if len(voxels) else 0
     s = as_spacing(spacing)
     return float(n) * (float(np.prod(s)) if s is not None else 1.0)
 
@@ -213,7 +213,8 @@ def centroid(voxels, spacing=None):
     validate(voxels)
     if len(voxels) == 0:
         raise ValueError("centroid() is undefined for an empty voxel set")
-    c = unique(voxels, axis=0).astype(float).mean(axis=0)
+    # A mean does not care what order it sums in.
+    c = unique_rows(voxels, sort=False).astype(float).mean(axis=0)
     s = as_spacing(spacing)
     return c * s if s is not None else c
 

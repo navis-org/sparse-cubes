@@ -53,7 +53,7 @@ import numpy as np
 
 from ._keys import as_spacing, sorted_hit, to_keys, validate
 from ._sparse import sparse_aware
-from .core import log, pack, unique
+from .core import log, pack, unique_rows
 from .skeleton import Skeleton
 
 # Same soft-dependency shape as `teasar`/`wavefront`: the library is a hard
@@ -392,18 +392,19 @@ def _graph(voxels):
     """A `dijkstra3d_sparse.Graph` over `voxels`, deduplicating only if forced to.
 
     `Graph` rejects duplicate coordinates, and the obvious response - dedup up
-    front - costs 4.3 s on the 5.5 M-voxel arbor against 0.07 s to build the
-    index, because `unique(axis=0)` sorts 3 columns of 5.5 M rows. A sparse-cubes
-    voxel set is unique by construction, so that was four times the raycast spent
-    proving there was nothing to remove. Ask forgiveness instead: the rare caller
-    with duplicates pays, and nobody else does.
+    front - used to cost 4.3 s on the 5.5 M-voxel arbor against 0.07 s to build
+    the index, because `unique(axis=0)` sorts 3 columns of 5.5 M rows. That was
+    four times the raycast spent proving there was nothing to remove, since a
+    sparse-cubes voxel set is unique by construction. `unique_rows` has since cut
+    the dedup to ~0.12 s, but ask-forgiveness still wins outright: the happy path
+    does no dedup work at all, and only the rare caller with duplicates pays.
     """
     try:
         return _dijkstra3d_sparse.Graph(
             np.ascontiguousarray(voxels, dtype=np.int32), index_kind="hash"
         )
     except ValueError:
-        clean = unique(np.asarray(voxels).astype(np.int64), axis=0)
+        clean = unique_rows(np.asarray(voxels).astype(np.int64), sort=False)
         return _dijkstra3d_sparse.Graph(
             np.ascontiguousarray(clean, dtype=np.int32), index_kind="hash"
         )

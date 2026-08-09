@@ -141,9 +141,19 @@ def mesh(voxels, spacing=None, step_size=1, verbose=False, smooth=True, simplify
     if not isinstance(spacing, type(None)):
         spacing = np.array(spacing)
 
-    # Step size is implemented by simple downsampling
+    # Step size is implemented by simple downsampling. The pooled cells are mostly
+    # repeats (step_size^3 fine voxels per cell), so dedup goes through
+    # `factorize`'s single hashing pass rather than `unique(axis=0)`, which sorts
+    # three columns of every *fine* voxel - 4.0 s against 0.04 s on the 5.5 M-voxel
+    # arbor, i.e. the downsampling alone cost 6x the whole step_size=1 mesh.
+    # `factorize` rejects coordinates outside the int32 range, but only the coarse
+    # cells reach it, and those are exactly what the later `exposed_faces` and
+    # vertex-dedup passes already require to be in range - so this raises the same
+    # error on the same inputs, just earlier.
     if step_size and step_size > 1:
-        voxels = unique(voxels // step_size, axis=0).astype(voxels.dtype)
+        cells = voxels // step_size
+        _, reps = _d3s.factorize(cells, return_index=True)[1:]
+        voxels = cells[reps].astype(voxels.dtype)
 
         if not isinstance(spacing, type(None)):
             spacing = spacing * step_size
@@ -291,6 +301,107 @@ def argsort_cols(a, order=[0, 1, 2]):
     return np.lexsort(cols)
 
 
+# `factorize` hashes int32 coordinates, so a cloud must span less than this to be
+# deduplicated by hashing once shifted to the origin.
+_INT32_SPAN = 1 << 31
+
+
+def _span(a):
+    """Widest per-axis extent of `a`, as a Python int.
+
+    Measured in Python ints rather than the array dtype because a signed dtype
+    cannot always hold its own span (int16 runs -32768..32767, spanning 65535),
+    so the obvious ``a.max(0) - a.min(0)`` can wrap to a small positive number
+    and wave an out-of-range cloud straight past the checks below.
+    """
+    return max(int(hi) - int(lo) for hi, lo in zip(a.max(axis=0), a.min(axis=0)))
+
+
+def _shift_to_origin(a):
+    """`a` translated so its minimum corner sits at the origin.
+
+    Unsigned input is shifted in its own dtype - the result is non-negative and
+    no wider than the span, so it always fits. Signed input goes through int64,
+    where the same is true of anything that passed a `_span` check.
+    """
+    lo = a.min(axis=0)
+    if a.dtype.kind == "u":
+        return a - lo
+    return a.astype(np.int64) - lo.astype(np.int64)
+
+
+def _distinct_reps(voxels):
+    """Row indices of the first occurrence of each distinct row, else None.
+
+    `factorize` hashes coordinates in the int32 range, so it rejects a cloud
+    parked at a large absolute offset even when the cloud itself is tiny.
+    Shifting to the origin converts that magnitude limit into a *span* limit -
+    the constraint the rest of the library already imposes - so the retry
+    rescues exactly the clouds the direct call gives up on, and only they pay
+    for the copy. None means even the span is out of range.
+    """
+    try:
+        return _d3s.factorize(voxels, return_index=True)[2]
+    except ValueError:
+        pass
+    if _span(voxels) >= _INT32_SPAN:
+        return None
+    return _d3s.factorize(_shift_to_origin(voxels), return_index=True)[2]
+
+
+def _sort_rows(u):
+    """`u` in lexicographic XYZ order, matching `unique(..., axis=0)`.
+
+    `pack`'s (x, y, z) bit layout makes an ascending key sort a lexicographic
+    row sort, and sorting one int64 column beats `np.lexsort` on three by ~10x
+    (0.09 s against 0.94 s for 5.5 M rows). The key only holds 21 bits per axis,
+    so a wider cloud takes the lexsort - still cheap, since by here it is the
+    distinct rows being sorted rather than the whole input.
+    """
+    if len(u) < 2:
+        return u
+    if _span(u) < _PACK_FIELD:
+        return u[np.argsort(pack(_shift_to_origin(u)), kind="stable")]
+    return sort_cols(u)
+
+
+def unique_rows(voxels, sort=True):
+    """Deduplicate the rows of an ``(N, 3)`` integer coordinate array.
+
+    `unique(..., axis=0)` lexsorts three columns of *every* input row, so it
+    costs the same whether the input is entirely duplicates or already unique -
+    4.2 s on the 5.5 M-voxel arbor either way. `factorize` labels the rows in a
+    single hashing pass instead, leaving only the *distinct* rows to be sorted:
+    0.12 s unsorted, 0.21 s sorted, on that same arbor.
+
+    Parameters
+    ----------
+    voxels :    (N, 3) integer array. Duplicates allowed, negatives fine.
+    sort :      bool, optional. If True (default), rows come back in
+                lexicographic XYZ order - byte-identical to
+                ``unique(voxels, axis=0)``, so this is a drop-in swap. If False,
+                they come back in first-appearance order, which is the cheaper
+                answer for callers that re-sort downstream or never look.
+
+    Returns
+    -------
+    (M, 3) array of the distinct rows, in the input dtype.
+    """
+    v = np.ascontiguousarray(voxels)
+    if len(v) == 0 or v.dtype not in INT_DTYPES:
+        # Non-integer rows have no exact hash: `factorize` would reject them and
+        # the shifted retry would silently truncate 0.5 and 0.6 onto one row.
+        # Sorting compares them faithfully, so hand those back to `unique`.
+        return unique(v, axis=0)
+
+    reps = _distinct_reps(v)
+    if reps is None:  # spans more than int32 even about its own minimum
+        return unique(v, axis=0)
+
+    u = v[reps]
+    return _sort_rows(u) if sort else u
+
+
 def find_surface_voxels(voxels):
     """Find surface voxels.
 
@@ -429,17 +540,24 @@ def boundary_shell(voxels):
     estimate and the TEASAR distance-from-boundary field.
     """
     left, right, back, front, bot, top = find_surface_voxels(voxels)
+    # Widen to int64 before stepping: the offsets are signed, and numpy promotes
+    # `uint64 + int64` to *float64*, which would hand back fractional-capable
+    # coordinates (and cost the exact-hash dedup below) for a uint64 input.
     shell = np.vstack(
         [
-            right + np.array([1, 0, 0]),
-            left + np.array([-1, 0, 0]),
-            top + np.array([0, 1, 0]),
-            bot + np.array([0, -1, 0]),
-            back + np.array([0, 0, 1]),
-            front + np.array([0, 0, -1]),
+            right.astype(np.int64, copy=False) + np.array([1, 0, 0]),
+            left.astype(np.int64, copy=False) + np.array([-1, 0, 0]),
+            top.astype(np.int64, copy=False) + np.array([0, 1, 0]),
+            bot.astype(np.int64, copy=False) + np.array([0, -1, 0]),
+            back.astype(np.int64, copy=False) + np.array([0, 0, 1]),
+            front.astype(np.int64, copy=False) + np.array([0, 0, -1]),
         ]
     )
-    return unique(shell, axis=0)
+    # Six overlapping face steps, so the stack is heavily duplicated - exactly
+    # what `unique_rows` is for. Unsorted: every caller either re-sorts the keys
+    # (`_fill_exact`) or feeds the shell to a KD-tree as an unordered reference
+    # set (`measure.distance_transform`, `skeleton`, `teasar`).
+    return unique_rows(shell, sort=False)
 
 
 # Packed-key deltas for the six face steps under pack()'s default (21, 21, 21)
@@ -702,7 +820,9 @@ def fill_cavities(voxels, *, mode="exact", max_depth=8, max_cavity_size=None, ve
             )
     else:
         raise ValueError(f"mode must be 'exact' or 'closing', got {mode!r}")
-    return unique(out, axis=0).astype(out_dtype)
+    # Sorted: this is the public return value, so the row order is part of what
+    # callers see and must stay what `unique(axis=0)` gave them.
+    return unique_rows(out).astype(out_dtype)
 
 
 def surface_voxel_mask(voxels):

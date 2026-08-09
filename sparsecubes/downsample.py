@@ -26,7 +26,7 @@ re-deriving would reintroduce the very links this avoids.
 
 import numpy as np
 
-from .core import pack, unpack, unique
+from .core import pack, unpack, unique, unique_rows
 from .graph import _edge_pairs
 from .thinning import _validate, _check_extent
 from ._sparse import sparse_aware
@@ -216,7 +216,8 @@ def downsample_graph(voxels, factor):
     dtype = voxels.dtype
     f = _as_factor(factor)
 
-    vox = unique(voxels, axis=0).astype(np.int64)
+    # Re-sorted by packed key a few lines down, so dedup order is irrelevant.
+    vox = unique_rows(voxels, sort=False).astype(np.int64)
     empty_edges = np.empty((0, 2), dtype=np.int64)
     if len(vox) == 0:
         return vox.astype(dtype), empty_edges

@@ -13,7 +13,7 @@ from collections import deque
 
 import numpy as np
 
-from .core import pack, log, unique, boundary_shell
+from .core import pack, log, unique_rows, boundary_shell
 from .thinning import thin, _check_extent, _validate
 from .graph import _edge_pairs
 from ._sparse import sparse_aware
@@ -348,7 +348,9 @@ def centerline(
     spacing = _as_spacing(spacing)
 
     if edges is None:
-        nodes = unique(thinned, axis=0).astype(np.int64)
+        # `_edges_26` re-sorts the nodes by packed key below, so the dedup
+        # order here is discarded either way.
+        nodes = unique_rows(thinned, sort=False).astype(np.int64)
     else:
         # Injected graph: keep `thinned` as-is so the given edges stay aligned.
         nodes = np.ascontiguousarray(thinned).astype(np.int64)
